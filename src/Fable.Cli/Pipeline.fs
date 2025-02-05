@@ -494,7 +494,8 @@ module Rust =
         }
 
 module Wasm =
-    type DartWriter(com: Compiler, cliArgs: CliArgs, pathResolver, targetPath: string) =
+    //open Fable.Transforms.Wasm
+    type WasmWriter(com: Compiler, cliArgs: CliArgs, pathResolver, targetPath: string) =
         let sourcePath = com.CurrentFile
         let fileExt = cliArgs.CompilerOptions.FileExtension
         let projDir = IO.Path.GetDirectoryName(cliArgs.ProjectFile)
@@ -527,8 +528,8 @@ module Wasm =
                 |> FableTransforms.transformFile com
                 |> Fable2Wasm.Compiler.transformFile com
 
-            if not (isSilent || DartPrinter.isEmpty file) then
-                use writer = new DartWriter(com, cliArgs, pathResolver, outPath)
+            if not (isSilent || Fable.Transforms.WasmPrinter.isEmpty file) then
+                use writer = new WasmWriter(com, cliArgs, pathResolver, outPath)
                 do! DartPrinter.run writer file
         }
 
