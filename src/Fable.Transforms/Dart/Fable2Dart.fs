@@ -3125,7 +3125,10 @@ module Compiler =
 
         let imports = com.GetAllImports()
 
-        {
-            File.Imports = imports
-            Declarations = rootDecls
-        }
+        let f: File =
+            {
+                File.Imports = imports
+                Declarations = rootDecls
+            }
+
+        f

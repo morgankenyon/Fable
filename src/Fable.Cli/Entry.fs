@@ -109,10 +109,11 @@ let knownCliArgs () =
             "  - rust (alias rs)"
             "  - php"
             "  - dart"
+            "  - wasm"
             ""
             "Default is javascript"
             ""
-            "Support for TypeScript, Python, Rust, Php and Dart is experimental."
+            "Support for TypeScript, Python, Rust, Php, Dart and Wasm is experimental."
         ]
         [ "--legacyCracker" ],
         [
@@ -194,6 +195,7 @@ let argLanguage (args: CliArgs) =
         | "dart" -> Ok Dart
         | "rs"
         | "rust" -> Ok Rust
+        | "wasm" -> Ok Wasm
         | unknown ->
             let errorMessage =
                 [
@@ -206,6 +208,7 @@ let argLanguage (args: CliArgs) =
                     "  - rust (alias rs)"
                     "  - php"
                     "  - dart"
+                    "  - wasm"
                 ]
                 |> String.concat "\n"
 
@@ -319,6 +322,7 @@ type Runner =
                         | Php -> "FABLE_COMPILER_PHP"
                         | Rust -> "FABLE_COMPILER_RUST"
                         | Dart -> "FABLE_COMPILER_DART"
+                        | Wasm -> "FABLE_COMPILER_WASM"
                         | Python -> "FABLE_COMPILER_PYTHON"
                         | TypeScript -> "FABLE_COMPILER_TYPESCRIPT"
                         | JavaScript -> "FABLE_COMPILER_JAVASCRIPT"
@@ -467,6 +471,7 @@ let getStatus =
     | Rust -> "alpha"
     | Dart -> "beta"
     | Php -> "experimental"
+    | Wasm -> "experimental"
 
 let getLibPkgVersion =
     function
@@ -475,6 +480,7 @@ let getLibPkgVersion =
     | Python
     | Rust
     | Dart
+    | Wasm
     | Php -> None
 
 let private logPrelude commands language =
