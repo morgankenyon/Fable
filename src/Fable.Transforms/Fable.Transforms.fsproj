@@ -13,6 +13,9 @@
     <Compile Include="Global/Prelude.fs" />
     <Compile Include="Global/Compiler.fs" />
     <Compile Include="Global/Naming.fs" />
+    <Compile Include="Wasm\Wasm.fs" />
+    <Compile Include="Wasm\Fable2Wasm.fs" />
+    <Compile Include="Wasm\WasmPrinter.fs" />
     <Compile Include="Python/Prelude.fs" />
     <Compile Include="MonadicTrampoline.fs" />
     <Compile Include="Transforms.Util.fs" />
