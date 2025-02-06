@@ -13,9 +13,6 @@
     <Compile Include="Global/Prelude.fs" />
     <Compile Include="Global/Compiler.fs" />
     <Compile Include="Global/Naming.fs" />
-    <Compile Include="Wasm\Wasm.fs" />
-    <Compile Include="Wasm\Fable2Wasm.fs" />
-    <Compile Include="Wasm\WasmPrinter.fs" />
     <Compile Include="Python/Prelude.fs" />
     <Compile Include="MonadicTrampoline.fs" />
     <Compile Include="Transforms.Util.fs" />
@@ -38,6 +35,9 @@
     <Compile Include="Python/Python.fs" />
     <Compile Include="Python/Fable2Python.fs" />
     <Compile Include="Python/PythonPrinter.fs" />
+    <Compile Include="Wasm\Wasm.fs" />
+    <Compile Include="Wasm\Fable2Wasm.fs" />
+    <Compile Include="Wasm\WasmPrinter.fs" />
     <Compile Include="Php/Php.fs" />
     <Compile Include="Php/Fable2Php.fs" />
     <Compile Include="Php/PhpPrinter.fs" />

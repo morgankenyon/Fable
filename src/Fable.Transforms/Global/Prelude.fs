@@ -424,6 +424,9 @@ module Path =
             | path -> "./" + path
 
     let getRelativePath fromFullPath toFullPath =
+        printfn "fromFullPath: %s" fromFullPath
+        printfn "toFullPath: %s" toFullPath
+
         // This is not 100% reliable, but IO.Directory.Exists doesn't
         // work either if the directory doesn't exist (e.g. `outDir`)
         let isDir = GetExtension >> String.IsNullOrWhiteSpace

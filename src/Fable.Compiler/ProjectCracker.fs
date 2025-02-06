@@ -668,6 +668,7 @@ let getFableLibraryPath (opts: CrackerOptions) =
         | JavaScript, None -> "fable-library-js", $"fable-library-js.%s{Literals.VERSION}"
         | Python, None -> "fable-library-py/fable_library", "fable_library"
         | Python, Some Py.Naming.sitePackages -> "fable-library-py", "fable-library"
+        | Wasm, None -> "fable-library-wasm", "fable-library"
         | _, Some path ->
             if path.StartsWith("./", StringComparison.Ordinal) then
                 "", Path.normalizeFullPath path

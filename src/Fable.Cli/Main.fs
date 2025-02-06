@@ -344,7 +344,7 @@ type ProjectCracked(cliArgs: CliArgs, crackerResponse: CrackerResponse, sourceFi
             match triggeredByDependency with
             | Some t -> { cliArgs.CompilerOptions with TriggeredByDependency = t }
             | None -> cliArgs.CompilerOptions
-
+        //printfn "%s" currentFile
         let fableLibDir = Path.getRelativePath currentFile crackerResponse.FableLibDir
 
         let watchDependencies =
