@@ -2723,6 +2723,7 @@ let getInlineExprs fileName (declarations: FSharpImplementationFileDeclaration l
 
     getInlineExprsInner declarations
 
+
 let transformFile (com: Compiler) =
     let declarations = com.GetImplementationFile(com.CurrentFile)
     let usedRootNames = getUsedRootNames com Set.empty declarations
@@ -2733,3 +2734,14 @@ let transformFile (com: Compiler) =
         transformDeclarations com ctx declarations |> List.map (attachClassMembers com)
 
     Fable.File(rootDecls, usedRootNames)
+
+
+let transformFileDeclarations (com: Compiler) (declarations: FSharpImplementationFileDeclaration list) =
+    let usedRootNames = getUsedRootNames com Set.empty declarations
+    let ctx = Context.Create(usedRootNames)
+    let com = FableCompiler(com)
+
+    let rootDecls =
+        transformDeclarations com ctx declarations |> List.map (attachClassMembers com)
+
+    rootDecls

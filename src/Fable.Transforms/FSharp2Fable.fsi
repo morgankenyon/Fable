@@ -12,3 +12,6 @@ val getInlineExprs:
     fileName: string -> declarations: FSharpImplementationFileDeclaration list -> (string * InlineExprLazy) list
 
 val transformFile: com: Compiler -> Fable.File
+
+val transformFileDeclarations:
+    com: Compiler -> declarations: FSharpImplementationFileDeclaration list -> Fable.Declaration list

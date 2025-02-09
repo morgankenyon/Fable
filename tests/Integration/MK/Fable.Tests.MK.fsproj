@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <DefineConstants>$(DefineConstants);DOTNET_FILE_SYSTEM</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Expecto" Version="10.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- <ProjectReference Include="../../src/Fable.Core/Fable.Core.fsproj" /> -->
+    <ProjectReference Include="../../../src/Fable.AST/Fable.AST.fsproj" />
+    <ProjectReference Include="../../../src/Fable.Transforms/Fable.Transforms.fsproj" />
+    <ProjectReference Include="../../../src/Fable.Cli/Fable.Cli.fsproj" />
+    <Reference Include="../../../lib/fcs/FSharp.Compiler.Service.dll" />
+    <Reference Include="../../../lib/fcs/FSharp.Core.dll" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../Js/Main/Util/Util.Testing.fs" />
+    <Compile Include="IntegrationTests.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+</Project>
