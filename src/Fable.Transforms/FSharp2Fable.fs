@@ -15,11 +15,10 @@ open Identifiers
 open Helpers
 open Util
 
-let private transformExprList com ctx xs =
-    trampolineListMap (transformExpr com ctx []) xs
+let private transformExprList com ctx xs = List.map (transformExpr com ctx []) xs
 
 let private transformExprOpt com ctx opt =
-    trampolineOptionMap (transformExpr com ctx []) opt
+    Option.map (transformExpr com ctx []) opt
 
 let private transformBaseConsCall
     com
@@ -32,7 +31,7 @@ let private transformBaseConsCall
     =
     let baseEntRef = FsEnt.Ref(baseEnt)
     let argTypes = lazy getArgTypes com baseCons
-    let baseArgs = transformExprList com ctx baseArgs |> run
+    let baseArgs = transformExprList com ctx baseArgs
     let genArgs = genArgs |> List.map (makeType ctx.GenericArgs)
 
     match Replacements.Api.tryBaseConstructor com ctx baseEntRef argTypes genArgs baseArgs with
@@ -291,16 +290,14 @@ let private transformTraitCall
     )
 
 let private transformCallee com ctx callee (calleeType: FSharpType) =
-    trampoline {
-        let! callee = transformExprOpt com ctx callee
+    let callee = transformExprOpt com ctx callee
 
-        let callee =
-            match callee with
-            | Some callee -> callee
-            | None -> FsEnt.Ref calleeType.TypeDefinition |> entityIdent com
+    let callee =
+        match callee with
+        | Some callee -> callee
+        | None -> FsEnt.Ref calleeType.TypeDefinition |> entityIdent com
 
-        return callee
-    }
+    callee
 
 let private resolveImportMemberBinding (ident: Fable.Ident) (info: Fable.ImportInfo) =
     if info.Selector = Naming.placeholder then
@@ -419,77 +416,68 @@ let private transformObjExpr
     let nonMangledMemberNames = HashSet()
     let nonMangledNameConflicts _ name = nonMangledMemberNames.Add(name) |> not
 
-    let mapOverride (over: FSharpObjectExprOverride) : Thunk<Fable.ObjectExprMember> =
-        trampoline {
-            let signature = over.Signature
-            let r = makeRangeFrom over.Body
+    let mapOverride (over: FSharpObjectExprOverride) : Fable.ObjectExprMember =
+        let signature = over.Signature
+        let r = makeRangeFrom over.Body
 
-            let info =
-                getImplementedSignatureInfo com ctx r nonMangledNameConflicts None signature true
+        let info =
+            getImplementedSignatureInfo com ctx r nonMangledNameConflicts None signature true
 
-            let ctx, args = bindMemberArgs com ctx over.CurriedParameterGroups
-            let! body = transformExpr com ctx [] over.Body
+        let ctx, args = bindMemberArgs com ctx over.CurriedParameterGroups
+        let body = transformExpr com ctx [] over.Body
 
-            return
-                {
-                    Name = info.name
-                    Args = args
-                    Body = body
-                    IsMangled = info.isMangled
-                    MemberRef = info.memberRef
-                }
+        {
+            Name = info.name
+            Args = args
+            Body = body
+            IsMangled = info.isMangled
+            MemberRef = info.memberRef
         }
 
-    trampoline {
-        let! baseCall =
-            trampoline {
-                match baseCallExpr with
-                // TODO: For interface implementations this should be FSharpExprPatterns.NewObject
-                // but check the baseCall.DeclaringEntity name just in case
-                | FSharpExprPatterns.Call(None, baseCall, genArgs1, genArgs2, baseArgs) ->
-                    match baseCall.DeclaringEntity with
-                    | Some baseEnt when baseEnt.TryFullName <> Some Types.object ->
-                        let r = makeRangeFrom baseCallExpr
-                        let genArgs = genArgs1 @ genArgs2
+    let baseCall =
+        match baseCallExpr with
+        // TODO: For interface implementations this should be FSharpExprPatterns.NewObject
+        // but check the baseCall.DeclaringEntity name just in case
+        | FSharpExprPatterns.Call(None, baseCall, genArgs1, genArgs2, baseArgs) ->
+            match baseCall.DeclaringEntity with
+            | Some baseEnt when baseEnt.TryFullName <> Some Types.object ->
+                let r = makeRangeFrom baseCallExpr
+                let genArgs = genArgs1 @ genArgs2
 
-                        return transformBaseConsCall com ctx r baseEnt baseCall genArgs baseArgs |> Some
-                    | _ -> return None
-                | _ -> return None
-            }
+                transformBaseConsCall com ctx r baseEnt baseCall genArgs baseArgs |> Some
+            | _ -> None
+        | _ -> None
 
-        let! members =
-            (objType, overrides) :: otherOverrides
-            |> trampolineListMap (fun (_typ, overrides) -> overrides |> trampolineListMap mapOverride)
+    let members =
+        (objType, overrides) :: otherOverrides
+        |> List.map (fun (_typ, overrides) -> overrides |> List.map mapOverride)
 
-        return Fable.ObjectExpr(members |> List.concat, makeType ctx.GenericArgs objType, baseCall)
-    }
+    Fable.ObjectExpr(members |> List.concat, makeType ctx.GenericArgs objType, baseCall)
 
 let private transformDelegate com ctx (delegateType: FSharpType) expr =
-    trampoline {
-        let! expr = transformExpr com ctx [] expr
+    let expr = transformExpr com ctx [] expr
 
-        // For some reason, when transforming to Func<'T> (no args) the F# compiler
-        // applies a unit arg to the expression, see #2400
-        let expr =
-            match tryDefinition delegateType with
-            | Some(_, Some _fullName) ->
-                match expr with
-                | Fable.CurriedApply(expr2, [ Fable.Value(Fable.UnitConstant, _) ], _, _) -> expr2
-                | Fable.Call(expr2, { Args = [ Fable.Value(Fable.UnitConstant, _) ] }, _, _) -> // expr2
-                    Fable.Delegate([], expr, None, Fable.Tags.empty)
-                | _ -> expr
-            | _ -> expr
-
-        match makeType ctx.GenericArgs delegateType with
-        | Fable.DelegateType(argTypes, _) ->
-            let arity = List.length argTypes |> max 1
-
+    // For some reason, when transforming to Func<'T> (no args) the F# compiler
+    // applies a unit arg to the expression, see #2400
+    let expr =
+        match tryDefinition delegateType with
+        | Some(_, Some _fullName) ->
             match expr with
-            | LambdaUncurriedAtCompileTime (Some arity) lambda -> return lambda
-            | _ when arity > 1 -> return Replacements.Api.uncurryExprAtRuntime com arity expr
-            | _ -> return expr
-        | _ -> return expr
-    }
+            | Fable.CurriedApply(expr2, [ Fable.Value(Fable.UnitConstant, _) ], _, _) -> expr2
+            | Fable.Call(expr2, { Args = [ Fable.Value(Fable.UnitConstant, _) ] }, _, _) -> // expr2
+                Fable.Delegate([], expr, None, Fable.Tags.empty)
+            | _ -> expr
+        | _ -> expr
+
+    match makeType ctx.GenericArgs delegateType with
+    | Fable.DelegateType(argTypes, _) ->
+        let arity = List.length argTypes |> max 1
+
+        match expr with
+        | LambdaUncurriedAtCompileTime (Some arity) lambda -> lambda
+        | _ when arity > 1 -> Replacements.Api.uncurryExprAtRuntime com arity expr
+        | _ -> expr
+    | _ -> expr
 
 let private transformUnionCaseTest
     (com: IFableCompiler)
@@ -499,71 +487,67 @@ let private transformUnionCaseTest
     fsType
     (unionCase: FSharpUnionCase)
     =
-    trampoline {
-        let! unionExpr = transformExpr com ctx [] unionExpr
+    let unionExpr = transformExpr com ctx [] unionExpr
 
-        match getUnionPattern fsType unionCase with
-        | ErasedUnionCase -> return "Cannot test erased union cases" |> addErrorAndReturnNull com ctx.InlinePath r
+    match getUnionPattern fsType unionCase with
+    | ErasedUnionCase -> "Cannot test erased union cases" |> addErrorAndReturnNull com ctx.InlinePath r
 
-        | ErasedUnion(tdef, genArgs, rule) ->
-            match unionCase.Fields.Count with
-            | 0 -> return makeEqOp r unionExpr (transformStringEnum rule unionCase) BinaryEqual
-            | 1 ->
-                let fi = unionCase.Fields[0]
+    | ErasedUnion(tdef, genArgs, rule) ->
+        match unionCase.Fields.Count with
+        | 0 -> makeEqOp r unionExpr (transformStringEnum rule unionCase) BinaryEqual
+        | 1 ->
+            let fi = unionCase.Fields[0]
 
-                let typ =
-                    if fi.FieldType.IsGenericParameter then
-                        let name = genParamName fi.FieldType.GenericParameter
+            let typ =
+                if fi.FieldType.IsGenericParameter then
+                    let name = genParamName fi.FieldType.GenericParameter
 
-                        let index =
-                            tdef.GenericParameters |> Seq.findIndex (fun arg -> genParamName arg = name)
+                    let index =
+                        tdef.GenericParameters |> Seq.findIndex (fun arg -> genParamName arg = name)
 
-                        genArgs[index]
-                    else
-                        fi.FieldType
+                    genArgs[index]
+                else
+                    fi.FieldType
 
-                let kind = makeType ctx.GenericArgs typ |> Fable.TypeTest
-                return Fable.Test(unionExpr, kind, r)
-            | _ ->
-                return
-                    "Erased unions with multiple cases cannot have more than one field: "
-                    + (getFsTypeFullName fsType)
-                    |> addErrorAndReturnNull com ctx.InlinePath r
+            let kind = makeType ctx.GenericArgs typ |> Fable.TypeTest
+            Fable.Test(unionExpr, kind, r)
+        | _ ->
+            "Erased unions with multiple cases cannot have more than one field: "
+            + (getFsTypeFullName fsType)
+            |> addErrorAndReturnNull com ctx.InlinePath r
 
-        | TypeScriptTaggedUnion(_, _, tagName, rule) ->
-            let isCompiledValue, value =
-                match FsUnionCase.CompiledValue unionCase with
-                | None -> false, transformStringEnum rule unionCase
-                | Some(CompiledValue.Integer i) -> true, makeIntConst i
-                | Some(CompiledValue.Float f) -> true, makeFloatConst f
-                | Some(CompiledValue.Boolean b) -> true, makeBoolConst b
+    | TypeScriptTaggedUnion(_, _, tagName, rule) ->
+        let isCompiledValue, value =
+            match FsUnionCase.CompiledValue unionCase with
+            | None -> false, transformStringEnum rule unionCase
+            | Some(CompiledValue.Integer i) -> true, makeIntConst i
+            | Some(CompiledValue.Float f) -> true, makeFloatConst f
+            | Some(CompiledValue.Boolean b) -> true, makeBoolConst b
 
-            match isCompiledValue, com.Options.Language with
-            | true, TypeScript ->
-                return
-                    "CompileValue attribute is not supported in TypeScript"
-                    |> addErrorAndReturnNull com ctx.InlinePath r
-            | _ ->
-                let getTag = Fable.Get(unionExpr, Fable.FieldInfo.Create(tagName), value.Type, r)
+        match isCompiledValue, com.Options.Language with
+        | true, TypeScript ->
+            "CompileValue attribute is not supported in TypeScript"
+            |> addErrorAndReturnNull com ctx.InlinePath r
+        | _ ->
+            let getTag = Fable.Get(unionExpr, Fable.FieldInfo.Create(tagName), value.Type, r)
 
-                return makeEqOp r getTag value BinaryEqual
+            makeEqOp r getTag value BinaryEqual
 
-        | OptionUnion _ ->
-            let kind =
-                Fable.OptionTest(unionCase.Name <> "None" && unionCase.Name <> "ValueNone")
+    | OptionUnion _ ->
+        let kind =
+            Fable.OptionTest(unionCase.Name <> "None" && unionCase.Name <> "ValueNone")
 
-            return Fable.Test(unionExpr, kind, r)
+        Fable.Test(unionExpr, kind, r)
 
-        | ListUnion _ ->
-            let kind = Fable.ListTest(unionCase.CompiledName <> "Empty")
-            return Fable.Test(unionExpr, kind, r)
+    | ListUnion _ ->
+        let kind = Fable.ListTest(unionCase.CompiledName <> "Empty")
+        Fable.Test(unionExpr, kind, r)
 
-        | StringEnum(_, rule) -> return makeEqOp r unionExpr (transformStringEnum rule unionCase) BinaryEqual
+    | StringEnum(_, rule) -> makeEqOp r unionExpr (transformStringEnum rule unionCase) BinaryEqual
 
-        | DiscriminatedUnion(tdef, _) ->
-            let tag = unionCaseTag com tdef unionCase
-            return Fable.Test(unionExpr, Fable.UnionCaseTest(tag), r)
-    }
+    | DiscriminatedUnion(tdef, _) ->
+        let tag = unionCaseTag com tdef unionCase
+        Fable.Test(unionExpr, Fable.UnionCaseTest(tag), r)
 
 let rec private transformDecisionTargets
     (com: IFableCompiler)
@@ -571,910 +555,884 @@ let rec private transformDecisionTargets
     acc
     (xs: (FSharpMemberOrFunctionOrValue list * FSharpExpr) list)
     =
-    trampoline {
-        match xs with
-        | [] -> return List.rev acc
-        | (idents, expr) :: tail ->
-            let ctx, idents =
-                (idents, (ctx, []))
-                ||> List.foldBack (fun ident (ctx, idents) ->
-                    let ctx, ident = putIdentInScope com ctx ident None
-                    ctx, ident :: idents
-                )
+    match xs with
+    | [] -> List.rev acc
+    | (idents, expr) :: tail ->
+        let ctx, idents =
+            (idents, (ctx, []))
+            ||> List.foldBack (fun ident (ctx, idents) ->
+                let ctx, ident = putIdentInScope com ctx ident None
+                ctx, ident :: idents
+            )
 
-            let! expr = transformExpr com ctx [] expr
+        let expr = transformExpr com ctx [] expr
 
-            return! transformDecisionTargets com ctx ((idents, expr) :: acc) tail
-    }
+        transformDecisionTargets com ctx ((idents, expr) :: acc) tail
 
 
-let private transformExpr (com: IFableCompiler) (ctx: Context) appliedGenArgs fsExpr =
-    trampoline {
-        match fsExpr with
-        // | ByrefArgToTuple (callee, memb, ownerGenArgs, membGenArgs, membArgs) ->
-        //     let! callee = transformExprOpt com ctx callee
-        //     let! args = transformExprList com ctx membArgs
-        //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
-        //     let typ = makeType ctx.GenericArgs fsExpr.Type
-        //     return makeCallFrom com ctx (makeRangeFrom fsExpr) typ genArgs callee args memb
+let private transformExpr (com: IFableCompiler) (ctx: Context) appliedGenArgs fsExpr : Fable.Expr =
+    match fsExpr with
+    // | ByrefArgToTuple (callee, memb, ownerGenArgs, membGenArgs, membArgs) ->
+    //     let! callee = transformExprOpt com ctx callee
+    //     let! args = transformExprList com ctx membArgs
+    //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
+    //     let typ = makeType ctx.GenericArgs fsExpr.Type
+    //     return makeCallFrom com ctx (makeRangeFrom fsExpr) typ genArgs callee args memb
 
-        // | ByrefArgToTupleOptimizedIf (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr) ->
-        //     let ctx, ident = putArgInScope com ctx outArg
-        //     let! callee = transformExprOpt com ctx callee
-        //     let! args = transformExprList com ctx membArgs
-        //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
-        //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
-        //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
-        //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
-        //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
-        //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
-        //     let identExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
-        //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
-        //     let! thenExpr = transformExpr com ctx [] thenExpr
-        //     let! elseExpr = transformExpr com ctx [] elseExpr
-        //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
-        //     return Fable.Let([tupleIdent, tupleExpr], Fable.Let([ident, identExpr], ifThenElse))
+    // | ByrefArgToTupleOptimizedIf (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr) ->
+    //     let ctx, ident = putArgInScope com ctx outArg
+    //     let! callee = transformExprOpt com ctx callee
+    //     let! args = transformExprList com ctx membArgs
+    //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
+    //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
+    //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
+    //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
+    //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
+    //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
+    //     let identExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
+    //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
+    //     let! thenExpr = transformExpr com ctx [] thenExpr
+    //     let! elseExpr = transformExpr com ctx [] elseExpr
+    //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
+    //     return Fable.Let([tupleIdent, tupleExpr], Fable.Let([ident, identExpr], ifThenElse))
 
-        // | ByrefArgToTupleOptimizedIf (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr) ->
-        //     let ctx, ident = putArgInScope com ctx outArg
-        //     let! callee = transformExprOpt com ctx callee
-        //     let! args = transformExprList com ctx membArgs
-        //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
-        //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
-        //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
-        //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
-        //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
-        //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
-        //     let identExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
-        //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
-        //     let! thenExpr = transformExpr com ctx [] thenExpr
-        //     let! elseExpr = transformExpr com ctx [] elseExpr
-        //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
-        //     return Fable.Let([tupleIdent, tupleExpr], Fable.Let([ident, identExpr], ifThenElse))
+    // | ByrefArgToTupleOptimizedIf (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr) ->
+    //     let ctx, ident = putArgInScope com ctx outArg
+    //     let! callee = transformExprOpt com ctx callee
+    //     let! args = transformExprList com ctx membArgs
+    //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
+    //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
+    //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
+    //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
+    //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
+    //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
+    //     let identExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
+    //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
+    //     let! thenExpr = transformExpr com ctx [] thenExpr
+    //     let! elseExpr = transformExpr com ctx [] elseExpr
+    //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
+    //     return Fable.Let([tupleIdent, tupleExpr], Fable.Let([ident, identExpr], ifThenElse))
 
-        // | ByrefArgToTupleOptimizedTree (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr, targetsExpr) ->
-        //     let ctx, ident = putArgInScope com ctx outArg
-        //     let! callee = transformExprOpt com ctx callee
-        //     let! args = transformExprList com ctx membArgs
-        //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
-        //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
-        //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
-        //     let tupleIdentExpr = Fable.IdentExpr ident
-        //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
-        //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
-        //     let! thenExpr = transformExpr com ctx [] thenExpr
-        //     let! elseExpr = transformExpr com ctx [] elseExpr
-        //     let! targetsExpr = transformDecisionTargets com ctx [] targetsExpr
-        //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
-        //     return Fable.Let([ident, tupleExpr], Fable.DecisionTree(ifThenElse, targetsExpr))
+    // | ByrefArgToTupleOptimizedTree (outArg, callee, memb, ownerGenArgs, membGenArgs, membArgs, thenExpr, elseExpr, targetsExpr) ->
+    //     let ctx, ident = putArgInScope com ctx outArg
+    //     let! callee = transformExprOpt com ctx callee
+    //     let! args = transformExprList com ctx membArgs
+    //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
+    //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
+    //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
+    //     let tupleIdentExpr = Fable.IdentExpr ident
+    //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
+    //     let guardExpr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
+    //     let! thenExpr = transformExpr com ctx [] thenExpr
+    //     let! elseExpr = transformExpr com ctx [] elseExpr
+    //     let! targetsExpr = transformDecisionTargets com ctx [] targetsExpr
+    //     let ifThenElse = Fable.IfThenElse(guardExpr, thenExpr, elseExpr, None)
+    //     return Fable.Let([ident, tupleExpr], Fable.DecisionTree(ifThenElse, targetsExpr))
 
-        // | ByrefArgToTupleOptimizedLet (id1, id2, callee, memb, ownerGenArgs, membGenArgs, membArgs, restExpr) ->
-        //     let ctx, ident1 = putArgInScope com ctx id1
-        //     let ctx, ident2 = putArgInScope com ctx id2
-        //     let! callee = transformExprOpt com ctx callee
-        //     let! args = transformExprList com ctx membArgs
-        //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
-        //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
-        //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
-        //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
-        //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
-        //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
-        //     let id1Expr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
-        //     let id2Expr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
-        //     let! restExpr = transformExpr com ctx [] restExpr
-        //     let body = Fable.Let([ident1, id1Expr], Fable.Let([ident2, id2Expr], restExpr))
-        //     return Fable.Let([tupleIdent, tupleExpr], body)
+    // | ByrefArgToTupleOptimizedLet (id1, id2, callee, memb, ownerGenArgs, membGenArgs, membArgs, restExpr) ->
+    //     let ctx, ident1 = putArgInScope com ctx id1
+    //     let ctx, ident2 = putArgInScope com ctx id2
+    //     let! callee = transformExprOpt com ctx callee
+    //     let! args = transformExprList com ctx membArgs
+    //     let genArgs = ownerGenArgs @ membGenArgs |> Seq.map (makeType ctx.GenericArgs)
+    //     let byrefType = makeType ctx.GenericArgs (List.last membArgs).Type
+    //     let tupleType = [Fable.Boolean; byrefType] |> Fable.Tuple
+    //     let tupleIdent = getIdentUniqueName ctx "tuple" |> makeIdent
+    //     let tupleIdentExpr = Fable.IdentExpr tupleIdent
+    //     let tupleExpr = makeCallFrom com ctx None tupleType genArgs callee args memb
+    //     let id1Expr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 0, tupleType, None)
+    //     let id2Expr = Fable.Get(tupleIdentExpr, Fable.TupleIndex 1, tupleType, None)
+    //     let! restExpr = transformExpr com ctx [] restExpr
+    //     let body = Fable.Let([ident1, id1Expr], Fable.Let([ident2, id2Expr], restExpr))
+    //     return Fable.Let([tupleIdent, tupleExpr], body)
 
-        // | ForOf (PutArgInScope com ctx (newContext, ident), value, body) ->
-        //     let! value = transformExpr com ctx [] value
-        //     let! body = transformExpr com newContext body
-        //     return Replacements.iterate com (makeRangeFrom fsExpr) ident body value
+    // | ForOf (PutArgInScope com ctx (newContext, ident), value, body) ->
+    //     let! value = transformExpr com ctx [] value
+    //     let! body = transformExpr com newContext body
+    //     return Replacements.iterate com (makeRangeFrom fsExpr) ident body value
 
-        // work-around for optimized "for x in list" (erases this sequential)
-        // | FSharpExprPatterns.Sequential (FSharpExprPatterns.ValueSet (current, FSharpExprPatterns.Value next1),
-        //                             (FSharpExprPatterns.ValueSet (next2, FSharpExprPatterns.UnionCaseGet
-        //                                 (_value, typ, unionCase, field))))
-        //         when next1.FullName = "next" && next2.FullName = "next"
-        //             && current.FullName = "current" && (getFsTypeFullName typ) = Types.list
-        //             && unionCase.Name = "op_ColonColon" && field.Name = "Tail" ->
-        //     // replace with nothing
-        //     return Fable.UnitConstant |> makeValue None
+    // work-around for optimized "for x in list" (erases this sequential)
+    // | FSharpExprPatterns.Sequential (FSharpExprPatterns.ValueSet (current, FSharpExprPatterns.Value next1),
+    //                             (FSharpExprPatterns.ValueSet (next2, FSharpExprPatterns.UnionCaseGet
+    //                                 (_value, typ, unionCase, field))))
+    //         when next1.FullName = "next" && next2.FullName = "next"
+    //             && current.FullName = "current" && (getFsTypeFullName typ) = Types.list
+    //             && unionCase.Name = "op_ColonColon" && field.Name = "Tail" ->
+    //     // replace with nothing
+    //     return Fable.UnitConstant |> makeValue None
 
-        | OptimizedOperator com (memb, comp, opName, argTypes, argExprs) ->
-            let r, typ = makeRangeFrom fsExpr, makeType ctx.GenericArgs fsExpr.Type
+    | OptimizedOperator com (memb, comp, opName, argTypes, argExprs) ->
+        let r, typ = makeRangeFrom fsExpr, makeType ctx.GenericArgs fsExpr.Type
 
-            let argTypes = argTypes |> List.map (makeType ctx.GenericArgs)
-            let! args = transformExprList com ctx argExprs
+        let argTypes = argTypes |> List.map (makeType ctx.GenericArgs)
+        let args = transformExprList com ctx argExprs
 
-            let entity: Fable.Entity =
-                match comp with
-                | Some comp -> upcast FsEnt comp.DeclaringEntity.Value
-                | None -> upcast FsEnt memb.DeclaringEntity.Value
+        let entity: Fable.Entity =
+            match comp with
+            | Some comp -> upcast FsEnt comp.DeclaringEntity.Value
+            | None -> upcast FsEnt memb.DeclaringEntity.Value
 
-            let membOpt = tryFindMember entity ctx.GenericArgs opName false argTypes
+        let membOpt = tryFindMember entity ctx.GenericArgs opName false argTypes
 
-            return
-                (match membOpt with
-                 | Some memb -> makeCallFrom com ctx r typ argTypes None args memb
-                 | None -> failwith $"Cannot find member %s{entity.FullName}.%s{opName}")
+        match membOpt with
+        | Some memb -> makeCallFrom com ctx r typ argTypes None args memb
+        | None -> failwith $"Cannot find member %s{entity.FullName}.%s{opName}"
 
-        | FSharpExprPatterns.Coerce(targetType, inpExpr) ->
-            let! (inpExpr: Fable.Expr) = transformExpr com ctx [] inpExpr
-            let t = makeType ctx.GenericArgs targetType
-            return Fable.TypeCast(inpExpr, t)
+    //| FSharpExprPatterns.Coerce(targetType, inpExpr) ->
+    //    let! (inpExpr: Fable.Expr) = transformExpr com ctx [] inpExpr
+    //    let t = makeType ctx.GenericArgs targetType
+    //    return Fable.TypeCast(inpExpr, t)
 
-        // TypeLambda is a local generic lambda
-        // e.g, member x.Test() = let typeLambda x = x in typeLambda 1, typeLambda "A"
-        // Sometimes these must be inlined, but that's resolved in FSharpExprPatterns.Let (see below)
-        | FSharpExprPatterns.TypeLambda(genArgs, lambda) ->
-            let ctx = resolveTypeLambdaGenArgs ctx genArgs lambda
-            let! lambda = transformExpr com ctx [] lambda
-            return lambda
+    //// TypeLambda is a local generic lambda
+    //// e.g, member x.Test() = let typeLambda x = x in typeLambda 1, typeLambda "A"
+    //// Sometimes these must be inlined, but that's resolved in FSharpExprPatterns.Let (see below)
+    //| FSharpExprPatterns.TypeLambda(genArgs, lambda) ->
+    //    let ctx = resolveTypeLambdaGenArgs ctx genArgs lambda
+    //    let! lambda = transformExpr com ctx [] lambda
+    //    return lambda
 
-        | FSharpExprPatterns.FastIntegerForLoop(start, limit, body, isUp, _, _) ->
+    //| FSharpExprPatterns.FastIntegerForLoop(start, limit, body, isUp, _, _) ->
+    //    let r = makeRangeFrom fsExpr
+
+    //    match body with
+    //    | FSharpExprPatterns.Lambda(PutIdentInScope com ctx (newContext, ident), body) ->
+    //        let! start = transformExpr com ctx [] start
+    //        let! limit = transformExpr com ctx [] limit
+    //        let! body = transformExpr com newContext [] body
+    //        return makeForLoop r isUp ident start limit body
+    //    | _ -> return failwithf $"Unexpected loop {r}: %A{fsExpr}"
+
+    | FSharpExprPatterns.WhileLoop(guardExpr, bodyExpr, _) ->
+        let guardExpr = transformExpr com ctx [] guardExpr
+        let bodyExpr = transformExpr com ctx [] bodyExpr
+
+        (guardExpr, bodyExpr) ||> makeWhileLoop (makeRangeFrom fsExpr)
+
+    | FSharpExprPatterns.Const(value, typ) ->
+        let typ = makeType ctx.GenericArgs typ
+        let expr = makeTypeConst (makeRangeFrom fsExpr) typ value
+        expr
+
+    | FSharpExprPatterns.BaseValue typ ->
+        let r = makeRangeFrom fsExpr
+        let typ = makeType Map.empty typ
+        Fable.Value(Fable.BaseValue(ctx.BoundMemberThis, typ), r)
+
+    // F# compiler doesn't represent `this` in non-constructors as FSharpExprPatterns.ThisValue (but FSharpExprPatterns.Value)
+    //| FSharpExprPatterns.ThisValue typ ->
+    //    let r = makeRangeFrom fsExpr
+
+    //    return
+    //        match typ, ctx.BoundConstructorThis with
+    //        // When it's ref type, this is the x in `type C() as x =`
+    //        | RefType _, _ ->
+    //            tryGetIdentFromScopeIf ctx r None (fun fsRef -> fsRef.IsConstructorThisValue)
+    //            |> Option.defaultWith (fun () ->
+    //                "Cannot find ConstructorThisValue" |> addErrorAndReturnNull com ctx.InlinePath r
+    //            )
+    //        // Check if `this` has been bound previously to avoid conflicts with an object expression
+    //        | _, Some i -> identWithRange r i |> Fable.IdentExpr
+    //        | _, None -> Fable.Value(makeType Map.empty typ |> Fable.ThisValue, r)
+
+    | FSharpExprPatterns.Value var ->
+        let r = makeRangeFrom fsExpr
+
+        let ctx =
+            List.map (makeType ctx.GenericArgs) appliedGenArgs
+            |> addGenArgsToContext ctx var
+
+        if isInline var then
             let r = makeRangeFrom fsExpr
 
-            match body with
-            | FSharpExprPatterns.Lambda(PutIdentInScope com ctx (newContext, ident), body) ->
-                let! start = transformExpr com ctx [] start
-                let! limit = transformExpr com ctx [] limit
-                let! body = transformExpr com newContext [] body
-                return makeForLoop r isUp ident start limit body
-            | _ -> return failwithf $"Unexpected loop {r}: %A{fsExpr}"
+            match ctx.ScopeInlineValues |> List.tryFind (fun (v, _) -> obj.Equals(v, var)) with
+            | Some(_, fsExpr) -> transformExpr com ctx [] fsExpr
+            | None ->
+                "Cannot resolve locally inlined value: " + var.DisplayName
+                |> addErrorAndReturnNull com ctx.InlinePath r
+        else
+            let v = makeValueFrom com ctx r var
 
-        | FSharpExprPatterns.WhileLoop(guardExpr, bodyExpr, _) ->
-            let! guardExpr = transformExpr com ctx [] guardExpr
-            let! bodyExpr = transformExpr com ctx [] bodyExpr
-
-            return (guardExpr, bodyExpr) ||> makeWhileLoop (makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.Const(value, typ) ->
-            let typ = makeType ctx.GenericArgs typ
-            let expr = makeTypeConst (makeRangeFrom fsExpr) typ value
-            return expr
-
-        | FSharpExprPatterns.BaseValue typ ->
-            let r = makeRangeFrom fsExpr
-            let typ = makeType Map.empty typ
-            return Fable.Value(Fable.BaseValue(ctx.BoundMemberThis, typ), r)
-
-        // F# compiler doesn't represent `this` in non-constructors as FSharpExprPatterns.ThisValue (but FSharpExprPatterns.Value)
-        | FSharpExprPatterns.ThisValue typ ->
-            let r = makeRangeFrom fsExpr
-
-            return
-                match typ, ctx.BoundConstructorThis with
-                // When it's ref type, this is the x in `type C() as x =`
-                | RefType _, _ ->
-                    tryGetIdentFromScopeIf ctx r None (fun fsRef -> fsRef.IsConstructorThisValue)
-                    |> Option.defaultWith (fun () ->
-                        "Cannot find ConstructorThisValue" |> addErrorAndReturnNull com ctx.InlinePath r
-                    )
-                // Check if `this` has been bound previously to avoid conflicts with an object expression
-                | _, Some i -> identWithRange r i |> Fable.IdentExpr
-                | _, None -> Fable.Value(makeType Map.empty typ |> Fable.ThisValue, r)
-
-        | FSharpExprPatterns.Value var ->
-            let r = makeRangeFrom fsExpr
-
-            let ctx =
-                List.map (makeType ctx.GenericArgs) appliedGenArgs
-                |> addGenArgsToContext ctx var
-
-            if isInline var then
-                let r = makeRangeFrom fsExpr
-
-                match ctx.ScopeInlineValues |> List.tryFind (fun (v, _) -> obj.Equals(v, var)) with
-                | Some(_, fsExpr) -> return! transformExpr com ctx [] fsExpr
-                | None ->
-                    return
-                        "Cannot resolve locally inlined value: " + var.DisplayName
-                        |> addErrorAndReturnNull com ctx.InlinePath r
+            if
+                isByRefValue var
+                &&
+                // The replacement only needs to happen when var.FullType = byref<fsExpr.Type>
+                fsExpr.Type = var.FullType.GenericArguments.[0]
+                && not (com.Options.Language = Rust)
+            then
+                // Getting byref value is compiled as FSharpRef op_Dereference
+                Replacements.Api.getRefCell com r (List.head v.Type.Generics) v
             else
-                let v = makeValueFrom com ctx r var
+                v
 
-                if
-                    isByRefValue var
-                    &&
-                    // The replacement only needs to happen when var.FullType = byref<fsExpr.Type>
-                    fsExpr.Type = var.FullType.GenericArguments.[0]
-                    && not (com.Options.Language = Rust)
-                then
-                    // Getting byref value is compiled as FSharpRef op_Dereference
-                    return Replacements.Api.getRefCell com r (List.head v.Type.Generics) v
-                else
-                    return v
+    // This is usually used to fill missing [<Optional>] arguments.
+    // Unchecked.defaultof<'T> is resolved in Replacements instead.
+    //| FSharpExprPatterns.DefaultValue(FableType com ctx typ) ->
+    //    let r = makeRangeFrom fsExpr
 
-        // This is usually used to fill missing [<Optional>] arguments.
-        // Unchecked.defaultof<'T> is resolved in Replacements instead.
+    //    match Compiler.Language with
+    //    // In Dart we don't want the compiler to pass default values other than null to [<Optional>] args
+    //    | Dart -> return Fable.Value(Fable.Null typ, r)
+    //    | _ -> return Replacements.Api.defaultof com ctx r typ
+
+    | FSharpExprPatterns.Let((var, value, _), body) ->
+        match value with
+
+        | CreateEvent(value, event) as createEvent ->
+            let value = transformExpr com ctx [] value
+            let typ = makeType ctx.GenericArgs createEvent.Type
+
+            let value =
+                makeCallFrom com ctx (makeRangeFrom createEvent) typ [] (Some value) [] event
+
+            let ctx, ident = putIdentInScope com ctx var (Some value)
+            let body = transformExpr com ctx [] body
+            Fable.Let(ident, value, body)
+
+        // Because in Dart we compile DefaultValue as null when it's passed to optional arguments,
+        // check if it's directly assigned in a binding and use the actual default value in that case
+        // (This is necessary to properly initialize the out arg in `TryParse` methods)
         | FSharpExprPatterns.DefaultValue(FableType com ctx typ) ->
             let r = makeRangeFrom fsExpr
+            let value = Replacements.Api.defaultof com ctx r typ
+            let ctx, ident = putIdentInScope com ctx var (Some value)
+            let body = transformExpr com ctx [] body
+            Fable.Let(ident, value, body)
 
-            match Compiler.Language with
-            // In Dart we don't want the compiler to pass default values other than null to [<Optional>] args
-            | Dart -> return Fable.Value(Fable.Null typ, r)
-            | _ -> return Replacements.Api.defaultof com ctx r typ
+        // F# compiler generates a tuple when matching against multiple values,
+        // we replace with immutable bindings instead which generates better code
+        // and increases the chances of the tuple being removed in beta reduction
+        //| FSharpExprPatterns.NewTuple(tupleType, tupleValues) as tupleExpr when
+        //    var.IsCompilerGenerated
+        //    && (var.CompiledName = "matchValue" || var.CompiledName = "patternInput")
+        //    ->
 
-        | FSharpExprPatterns.Let((var, value, _), body) ->
+        //    let! tupleValues = transformExprList com ctx tupleValues
+
+        //    let bindings, tupleValues =
+        //        (([], []), tupleValues)
+        //        ||> List.fold (fun (bindings, tupleValues) value ->
+        //            match value with
+        //            | Fable.IdentExpr id ->
+        //                if not id.IsMutable then
+        //                    bindings, value :: tupleValues
+        //                else
+        //                    let i = getIdentUniqueName ctx id.Name |> makeTypedIdent id.Type
+
+        //                    (i, value) :: bindings, (Fable.IdentExpr i) :: tupleValues
+        //            | value ->
+        //                let i = getIdentUniqueName ctx "matchValue" |> makeTypedIdent value.Type
+
+        //                (i, value) :: bindings, (Fable.IdentExpr i) :: tupleValues
+        //        )
+
+        //    let value =
+        //        Fable.NewTuple(List.rev tupleValues, tupleType.IsStructTupleType)
+        //        |> makeValue (makeRangeFrom tupleExpr)
+
+        //    let ctx, ident = putIdentInScope com ctx var (Some value)
+        //    let! body = transformExpr com ctx [] body
+        //    let expr = Fable.Let(ident, value, body)
+
+        //    return (expr, bindings) ||> List.fold (fun e (i, v) -> Fable.Let(i, v, e))
+
+        //| _ when isInline var ->
+        //    let ctx = { ctx with ScopeInlineValues = (var, value) :: ctx.ScopeInlineValues }
+
+        //    return! transformExpr com ctx [] body
+
+        | _ ->
+            let ctx, value =
+                match value with
+                | FSharpExprPatterns.TypeLambda(genArgs, lambda) ->
+                    let ctx = resolveTypeLambdaGenArgs ctx genArgs lambda
+                    ctx, lambda
+                | _ -> ctx, value
+
+            let value = transformExpr com ctx [] value
+            let ctx, ident = putIdentInScope com ctx var (Some value)
+            let body = transformExpr com ctx [] body
+
             match value with
+            | Fable.Import(info, t, r) when not info.IsCompilerGenerated ->
+                Fable.Let(ident, Fable.Import(resolveImportMemberBinding ident info, t, r), body)
+            // Unwrap lambdas for user-generated imports, as in: `let add (x:int) (y:int): int = importMember "./util.js"`
+            | AST.NestedLambda(args, Fable.Import(info, _, r), _) when not info.IsCompilerGenerated ->
+                let t = value.Type
+                let info = resolveImportMemberBinding ident info
 
-            | CreateEvent(value, event) as createEvent ->
-                let! value = transformExpr com ctx [] value
-                let typ = makeType ctx.GenericArgs createEvent.Type
 
-                let value =
-                    makeCallFrom com ctx (makeRangeFrom createEvent) typ [] (Some value) [] event
+                Fable.Let(ident, Fable.Extended(Fable.Curry(Fable.Import(info, t, r), List.length args), r), body)
+            | _ -> Fable.Let(ident, value, body)
 
-                let ctx, ident = putIdentInScope com ctx var (Some value)
-                let! body = transformExpr com ctx [] body
-                return Fable.Let(ident, value, body)
+    | FSharpExprPatterns.LetRec(recBindings, body) ->
+        // First get a context containing all idents and use it compile the values
+        let ctx, idents =
+            (recBindings, (ctx, []))
+            ||> List.foldBack (fun (PutIdentInScope com ctx (newContext, ident), _, _) (ctx, idents) ->
+                (newContext, ident :: idents)
+            )
 
-            // Because in Dart we compile DefaultValue as null when it's passed to optional arguments,
-            // check if it's directly assigned in a binding and use the actual default value in that case
-            // (This is necessary to properly initialize the out arg in `TryParse` methods)
-            | FSharpExprPatterns.DefaultValue(FableType com ctx typ) ->
-                let r = makeRangeFrom fsExpr
-                let value = Replacements.Api.defaultof com ctx r typ
-                let ctx, ident = putIdentInScope com ctx var (Some value)
-                let! body = transformExpr com ctx [] body
-                return Fable.Let(ident, value, body)
+        let _, bindingExprs, _ = List.unzip3 recBindings
+        let exprs = transformExprList com ctx bindingExprs
+        let bindings = List.zip idents exprs
+        let body = transformExpr com ctx [] body
 
-            // F# compiler generates a tuple when matching against multiple values,
-            // we replace with immutable bindings instead which generates better code
-            // and increases the chances of the tuple being removed in beta reduction
-            | FSharpExprPatterns.NewTuple(tupleType, tupleValues) as tupleExpr when
-                var.IsCompilerGenerated
-                && (var.CompiledName = "matchValue" || var.CompiledName = "patternInput")
-                ->
+        match bindings with
+        // If there's only one binding compile as Let to play better with optimizations
+        | [ ident, value ] -> Fable.Let(ident, value, body)
+        | bindings -> Fable.LetRec(bindings, body)
 
-                let! tupleValues = transformExprList com ctx tupleValues
+    // `argTypes2` is always empty
+    //| FSharpExprPatterns.TraitCall(sourceTypes, traitName, flags, argTypes, _argTypes2, argExprs) ->
+    //    let r = makeRangeFrom fsExpr
+    //    let typ = makeType ctx.GenericArgs fsExpr.Type
+    //    let! argExprs = transformExprList com ctx argExprs
+    //    let argTypes = List.map (makeType ctx.GenericArgs) argTypes
 
-                let bindings, tupleValues =
-                    (([], []), tupleValues)
-                    ||> List.fold (fun (bindings, tupleValues) value ->
-                        match value with
-                        | Fable.IdentExpr id ->
-                            if not id.IsMutable then
-                                bindings, value :: tupleValues
-                            else
-                                let i = getIdentUniqueName ctx id.Name |> makeTypedIdent id.Type
+    //    match ctx.PrecompilingInlineFunction with
+    //    | Some _ ->
+    //        let sourceTypes = List.map (makeType ctx.GenericArgs) sourceTypes
 
-                                (i, value) :: bindings, (Fable.IdentExpr i) :: tupleValues
-                        | value ->
-                            let i = getIdentUniqueName ctx "matchValue" |> makeTypedIdent value.Type
+    //        let e =
+    //            Fable.UnresolvedTraitCall(sourceTypes, traitName, flags.IsInstance, argTypes, argExprs)
 
-                            (i, value) :: bindings, (Fable.IdentExpr i) :: tupleValues
+    //        return Fable.Unresolved(e, typ, r)
+    //    | None ->
+    //        match tryFindWitness ctx argTypes flags.IsInstance traitName with
+    //        | None ->
+    //            let sourceTypes = List.map (makeType ctx.GenericArgs) sourceTypes
+    //            return transformTraitCall com ctx r typ sourceTypes traitName flags.IsInstance argTypes argExprs
+    //        | Some w ->
+    //            let callInfo = makeCallInfo None argExprs argTypes
+    //            return makeCall r typ callInfo w.Expr
+
+    | FSharpExprPatterns.CallWithWitnesses(callee, memb, ownerGenArgs, membGenArgs, witnesses, args) ->
+        let typ = makeType ctx.GenericArgs fsExpr.Type
+        let callGenArgs = ownerGenArgs @ membGenArgs |> List.map (makeType ctx.GenericArgs)
+        let args = transformExprList com ctx args
+
+        // Sometimes args may include local generics (e.g. an identifier referencing a local generic function)
+        // so we try to match extract them by comparing the arg types with the expected types (from the member signature)
+        let args =
+            let expectedArgTypes =
+                let ctx = addGenArgsToContext ctx memb callGenArgs
+
+                Seq.concat memb.CurriedParameterGroups
+                |> Seq.map (fun x -> makeType ctx.GenericArgs x.Type)
+                |> Seq.toList
+
+            if List.sameLength args expectedArgTypes then
+                List.zip args expectedArgTypes
+                |> List.map (fun (argExpr, expectedArgType) ->
+                    extractGenericArgs argExpr expectedArgType |> replaceGenericArgs argExpr
+                )
+            else
+                args
+
+        match callee, memb with
+        | Some(CreateEvent(callee, event) as createEvent), _ ->
+            let callee = transformExpr com ctx [] callee
+            let eventType = makeType ctx.GenericArgs createEvent.Type
+
+            let callee =
+                makeCallFrom com ctx (makeRangeFrom createEvent) eventType [] (Some callee) [] event
+
+            makeCallFrom com ctx (makeRangeFrom fsExpr) typ callGenArgs (Some callee) args memb
+
+        | Some unionExpr, UnionCaseTesterFor unionCase ->
+            transformUnionCaseTest com ctx (makeRangeFrom fsExpr) unionExpr unionExpr.Type unionCase
+
+        | callee, _ ->
+            let r = makeRangeFrom fsExpr
+            let callee = transformExprOpt com ctx callee
+
+            let ctx =
+
+                match witnesses with
+                | [] -> ctx
+                | witnesses ->
+                    let witnesses =
+                        witnesses
+                        |> List.choose (
+                            function
+                            // Index is not reliable, just append witnesses from parent call
+                            | FSharpExprPatterns.WitnessArg _idx -> None
+                            | NestedLambda(args, body) ->
+                                match body with
+                                | FSharpExprPatterns.Call(callee, memb, _, _, _args) ->
+                                    Some(memb.CompiledName, Option.isSome callee, args, body)
+                                | FSharpExprPatterns.AnonRecordGet(_, calleeType, fieldIndex) ->
+                                    let fieldName = calleeType.AnonRecordTypeDetails.SortedFieldNames[fieldIndex]
+
+                                    Some("get_" + fieldName, true, args, body)
+                                | FSharpExprPatterns.FSharpFieldGet(_, _, field) ->
+                                    Some("get_" + field.Name, true, args, body)
+                                | _ -> None
+                            | _ -> None
+                        )
+
+                    // Seems witness act like a stack (that's why we reverse them)
+                    // so a witness may need other witnesses to be resolved
+
+                    (ctx, List.rev witnesses)
+                    ||> List.fold (fun ctx (traitName, isInstance, args, body) ->
+                        let ctx, args = makeFunctionArgs com ctx args
+
+                        let body = transformExpr com ctx [] body
+
+                        let w: Fable.Witness =
+                            {
+                                TraitName = traitName
+                                IsInstance = isInstance
+                                FileName = com.CurrentFile
+                                Expr = Fable.Delegate(args, body, None, Fable.Tags.empty)
+                            }
+
+                        { ctx with Witnesses = w :: ctx.Witnesses }
                     )
 
-                let value =
-                    Fable.NewTuple(List.rev tupleValues, tupleType.IsStructTupleType)
-                    |> makeValue (makeRangeFrom tupleExpr)
+            makeCallFrom com ctx r typ callGenArgs callee args memb
 
-                let ctx, ident = putIdentInScope com ctx var (Some value)
-                let! body = transformExpr com ctx [] body
-                let expr = Fable.Let(ident, value, body)
+    // TODO: We may need to resolve local generics in args as we do in CallWithWitnesses
+    //| FSharpExprPatterns.Application(applied, genArgs, args) ->
+    //    match applied, args with
+    //    // Why do application without arguments happen? So far I've seen it
+    //    // to access None or struct values (like the Result type)
+    //    | _, [] -> return! transformExpr com ctx genArgs applied
 
-                return (expr, bindings) ||> List.fold (fun e (i, v) -> Fable.Let(i, v, e))
+    //    // When using Fable dynamic operator, we must untuple arguments
+    //    // Note F# compiler wraps the value in a closure if it detects it's a lambda
+    //    | FSharpExprPatterns.Let((_, FSharpExprPatterns.Call(None, m, _, _, [ e1; e2 ]), _), _), args when
+    //        m.FullName = "Fable.Core.JsInterop.(?)"
+    //        || m.FullName = "Fable.Core.PyInterop.(?)"
+    //        ->
+    //        let! e1 = transformExpr com ctx genArgs e1
+    //        let! e2 = transformExpr com ctx [] e2
+    //        let e = Fable.Get(e1, Fable.ExprGet e2, Fable.Any, e1.Range)
+    //        let! args = transformExprList com ctx args
+    //        let args = destructureTupleArgs args
+    //        let typ = makeType ctx.GenericArgs fsExpr.Type
+    //        let r = makeRangeFrom fsExpr
+    //        // Convert this to emit so auto-uncurrying is applied
+    //        return emitExpr r typ (e :: args) "$0($1...)"
 
-            | _ when isInline var ->
-                let ctx = { ctx with ScopeInlineValues = (var, value) :: ctx.ScopeInlineValues }
+    //    // Some instance members such as Option.get_IsSome are compiled as static members, and the F# compiler
+    //    // wraps calls with an application. But in Fable they will be replaced so the application is not needed
+    //    | FSharpExprPatterns.Call(Some _, memb, _, [], []) as call, [ FSharpExprPatterns.Const(null, _) ] when
+    //        memb.IsInstanceMember && not memb.IsInstanceMemberInCompiledCode
+    //        ->
+    //        return! transformExpr com ctx [] call
 
-                return! transformExpr com ctx [] body
+    //    | applied, args ->
+    //        let! applied = transformExpr com ctx genArgs applied
+    //        let! args = transformExprList com ctx args
+    //        let typ = makeType ctx.GenericArgs fsExpr.Type
 
-            | _ ->
-                let ctx, value =
-                    match value with
-                    | FSharpExprPatterns.TypeLambda(genArgs, lambda) ->
-                        let ctx = resolveTypeLambdaGenArgs ctx genArgs lambda
-                        ctx, lambda
-                    | _ -> ctx, value
+    //        return Fable.CurriedApply(applied, args, typ, makeRangeFrom fsExpr)
 
-                let! value = transformExpr com ctx [] value
-                let ctx, ident = putIdentInScope com ctx var (Some value)
-                let! body = transformExpr com ctx [] body
+    | FSharpExprPatterns.IfThenElse(guardExpr, thenExpr, elseExpr) ->
+        let guardExpr = transformExpr com ctx [] guardExpr
+        let thenExpr = transformExpr com ctx [] thenExpr
+        let fableElseExpr = transformExpr com ctx [] elseExpr
 
-                match value with
-                | Fable.Import(info, t, r) when not info.IsCompilerGenerated ->
-                    return Fable.Let(ident, Fable.Import(resolveImportMemberBinding ident info, t, r), body)
-                // Unwrap lambdas for user-generated imports, as in: `let add (x:int) (y:int): int = importMember "./util.js"`
-                | AST.NestedLambda(args, Fable.Import(info, _, r), _) when not info.IsCompilerGenerated ->
-                    let t = value.Type
-                    let info = resolveImportMemberBinding ident info
+        let altElseExpr =
+            match elseExpr with
+            | RaisingMatchFailureExpr _infoWhereErrorOccurs ->
+                let errorMessage = "Match failure"
+                let rangeOfElseExpr = makeRangeFrom elseExpr
 
-                    return
-                        Fable.Let(
-                            ident,
-                            Fable.Extended(Fable.Curry(Fable.Import(info, t, r), List.length args), r),
-                            body
-                        )
-                | _ -> return Fable.Let(ident, value, body)
+                let errorExpr =
+                    Fable.Value(Fable.StringConstant errorMessage, None)
+                    |> Replacements.Api.error com
 
-        | FSharpExprPatterns.LetRec(recBindings, body) ->
-            // First get a context containing all idents and use it compile the values
-            let ctx, idents =
-                (recBindings, (ctx, []))
-                ||> List.foldBack (fun (PutIdentInScope com ctx (newContext, ident), _, _) (ctx, idents) ->
-                    (newContext, ident :: idents)
+                makeThrow rangeOfElseExpr Fable.Any errorExpr
+            | _ -> fableElseExpr
+
+        Fable.IfThenElse(guardExpr, thenExpr, altElseExpr, makeRangeFrom fsExpr)
+
+    | FSharpExprPatterns.TryFinally(body, finalBody, _, _) ->
+        let r = makeRangeFrom fsExpr
+
+        match body with
+        | FSharpExprPatterns.TryWith(body, _, _, catchVar, catchBody, _, _) ->
+            makeTryCatch com ctx r body (Some(catchVar, catchBody)) (Some finalBody)
+        | _ -> makeTryCatch com ctx r body None (Some finalBody)
+
+    | FSharpExprPatterns.TryWith(body, _, _, catchVar, catchBody, _, _) ->
+        makeTryCatch com ctx (makeRangeFrom fsExpr) body (Some(catchVar, catchBody)) None
+
+    | FSharpExprPatterns.NewDelegate(delegateType, fsExpr) -> transformDelegate com ctx delegateType fsExpr
+
+    | FSharpExprPatterns.Lambda(arg, body) ->
+        let ctx, args = makeFunctionArgs com ctx [ arg ]
+
+        match args with
+        | [ arg ] ->
+            let body = transformExpr com ctx [] body
+            let body = flattenLambdaBodyWithTupleArgs arg body
+            Fable.Lambda(arg, body, None)
+        | _ -> failwith "makeFunctionArgs returns args with different length"
+
+    // Getters and Setters
+    | FSharpExprPatterns.AnonRecordGet(callee, calleeType, fieldIndex) ->
+        let r = makeRangeFrom fsExpr
+        let callee = transformExpr com ctx [] callee
+
+        let fieldName = calleeType.AnonRecordTypeDetails.SortedFieldNames[fieldIndex]
+
+        let typ = makeType ctx.GenericArgs fsExpr.Type
+        // Don't use generics from the inlined context for the field type as this is used for uncurrying
+        let fieldType = makeType Map.empty fsExpr.Type
+
+        Fable.Get(callee, Fable.FieldInfo.Create(fieldName, fieldType = fieldType), typ, r)
+
+    | FSharpExprPatterns.FSharpFieldGet(callee, calleeType, field) ->
+        let r = makeRangeFrom fsExpr
+        let callee = transformCallee com ctx callee calleeType
+        // let typ = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
+        let typ = resolveFieldType ctx calleeType field.FieldType
+
+        let kind =
+            Fable.FieldInfo.Create(
+                FsField.FSharpFieldName field,
+                fieldType = makeType Map.empty field.FieldType,
+                isMutable = field.IsMutable
+            )
+
+        Fable.Get(callee, kind, typ, r)
+
+    | FSharpExprPatterns.TupleGet(tupleType, tupleElemIndex, IgnoreAddressOf tupleExpr) ->
+        // F# compiler generates a tuple when matching against multiple values,
+        // if the TupleGet accesses an immutable ident in scope we use the ident directly
+        // to increase the chances of the tuple being removed in beta reduction
+        let tupleElemValue =
+            match tupleExpr with
+            | FSharpExprPatterns.Value tupleIdent when
+                tupleIdent.IsCompilerGenerated
+                && (tupleIdent.CompiledName = "matchValue"
+                    || tupleIdent.CompiledName = "patternInput")
+                ->
+                tryGetValueFromScope ctx tupleIdent
+                |> Option.bind (
+                    function
+                    | Fable.Value(Fable.NewTuple(values, _), _) -> List.tryItem tupleElemIndex values
+                    | _ -> None
+                )
+            | _ -> None
+
+        match tupleElemValue with
+        | Some(Fable.IdentExpr id as e) when not id.IsMutable -> e
+        | _ ->
+            let tupleExpr = transformExpr com ctx [] tupleExpr
+            //            let typ = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
+            let typ =
+                Seq.item tupleElemIndex tupleType.GenericArguments |> makeType ctx.GenericArgs
+
+            Fable.Get(tupleExpr, Fable.TupleIndex tupleElemIndex, typ, makeRangeFrom fsExpr)
+
+    | FSharpExprPatterns.UnionCaseGet(IgnoreAddressOf unionExpr, unionType, unionCase, field) ->
+        let r = makeRangeFrom fsExpr
+        // let fieldType = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
+        let fieldType = resolveFieldType ctx unionType field.FieldType
+        let unionExpr = transformExpr com ctx [] unionExpr
+
+        match getUnionPattern unionType unionCase with
+        | ErasedUnionCase ->
+            let index = unionCase.Fields |> Seq.findIndex (fun x -> x.Name = field.Name)
+
+            Fable.Get(unionExpr, Fable.TupleIndex(index), makeType ctx.GenericArgs unionType, r)
+        | ErasedUnion _ ->
+            if unionCase.Fields.Count = 1 then
+                unionExpr
+            else
+                let index = unionCase.Fields |> Seq.findIndex (fun x -> x.Name = field.Name)
+
+                Fable.Get(unionExpr, Fable.TupleIndex index, fieldType, r)
+        | TypeScriptTaggedUnion _ ->
+            // if not (FsUnionCase.HasNamedFields unionCase) then
+            //     return unionExpr
+            // else
+            let kind =
+                Fable.FieldInfo.Create(FsField.FSharpFieldName field, fieldType = makeType Map.empty field.FieldType)
+
+            Fable.Get(unionExpr, kind, fieldType, r)
+        | StringEnum _ ->
+            "StringEnum types cannot have fields"
+            |> addErrorAndReturnNull com ctx.InlinePath r
+        | OptionUnion(t, _) -> Fable.Get(unionExpr, Fable.OptionValue, makeType ctx.GenericArgs t, r)
+        | ListUnion t ->
+            let t = makeType ctx.GenericArgs t
+
+            let kind, t =
+                if field.Name = "Head" then
+                    Fable.ListHead, t
+                else
+                    Fable.ListTail, Fable.List t
+
+            Fable.Get(unionExpr, kind, t, r)
+        | DiscriminatedUnion(tdef, genArgs) ->
+            let caseIndex = unionCaseTag com tdef unionCase
+
+            let fieldIndex = unionCase.Fields |> Seq.findIndex (fun fi -> fi.Name = field.Name)
+
+            let kind =
+                Fable.UnionFieldInfo.Create(
+                    entity = FsEnt.Ref tdef,
+                    genArgs = makeTypeGenArgs ctx.GenericArgs genArgs,
+                    caseIndex = caseIndex,
+                    fieldIndex = fieldIndex
                 )
 
-            let _, bindingExprs, _ = List.unzip3 recBindings
-            let! exprs = transformExprList com ctx bindingExprs
-            let bindings = List.zip idents exprs
-            let! body = transformExpr com ctx [] body
+            Fable.Get(unionExpr, kind, fieldType, r)
 
-            match bindings with
-            // If there's only one binding compile as Let to play better with optimizations
-            | [ ident, value ] -> return Fable.Let(ident, value, body)
-            | bindings -> return Fable.LetRec(bindings, body)
+    | FSharpExprPatterns.FSharpFieldSet(callee, calleeType, field, value) ->
+        let r = makeRangeFrom fsExpr
+        let t = makeType Map.empty field.FieldType
+        let callee = transformCallee com ctx callee calleeType
+        let value = transformExpr com ctx [] value
 
-        // `argTypes2` is always empty
-        | FSharpExprPatterns.TraitCall(sourceTypes, traitName, flags, argTypes, _argTypes2, argExprs) ->
-            let r = makeRangeFrom fsExpr
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-            let! argExprs = transformExprList com ctx argExprs
-            let argTypes = List.map (makeType ctx.GenericArgs) argTypes
+        Fable.Set(callee, Fable.FieldSet(FsField.FSharpFieldName field), t, value, r)
 
-            match ctx.PrecompilingInlineFunction with
-            | Some _ ->
-                let sourceTypes = List.map (makeType ctx.GenericArgs) sourceTypes
+    | FSharpExprPatterns.UnionCaseTag(IgnoreAddressOf unionExpr, unionType) ->
+        // TODO: This is an inconsistency. For new unions and union tests we calculate
+        // the tag in this step but here we delay the calculation until Fable2Babel
+        do
+            tryDefinition unionType
+            |> Option.iter (fun (tdef, _) -> com.AddWatchDependency(FsEnt.SourcePath tdef))
 
-                let e =
-                    Fable.UnresolvedTraitCall(sourceTypes, traitName, flags.IsInstance, argTypes, argExprs)
+        let unionExpr = transformExpr com ctx [] unionExpr
 
-                return Fable.Unresolved(e, typ, r)
-            | None ->
-                match tryFindWitness ctx argTypes flags.IsInstance traitName with
-                | None ->
-                    let sourceTypes = List.map (makeType ctx.GenericArgs) sourceTypes
-                    return transformTraitCall com ctx r typ sourceTypes traitName flags.IsInstance argTypes argExprs
-                | Some w ->
-                    let callInfo = makeCallInfo None argExprs argTypes
-                    return makeCall r typ callInfo w.Expr
+        Fable.Get(unionExpr, Fable.UnionTag, Fable.Any, makeRangeFrom fsExpr)
 
-        | FSharpExprPatterns.CallWithWitnesses(callee, memb, ownerGenArgs, membGenArgs, witnesses, args) ->
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-            let callGenArgs = ownerGenArgs @ membGenArgs |> List.map (makeType ctx.GenericArgs)
-            let! args = transformExprList com ctx args
+    | FSharpExprPatterns.UnionCaseSet(_unionExpr, _type, _case, _caseField, _valueExpr) ->
+        "Unexpected UnionCaseSet"
+        |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
 
-            // Sometimes args may include local generics (e.g. an identifier referencing a local generic function)
-            // so we try to match extract them by comparing the arg types with the expected types (from the member signature)
-            let args =
-                let expectedArgTypes =
-                    let ctx = addGenArgsToContext ctx memb callGenArgs
+    | FSharpExprPatterns.ValueSet(valToSet, valueExpr) ->
+        let r = makeRangeFrom fsExpr
+        let valueExpr = transformExpr com ctx [] valueExpr
 
-                    Seq.concat memb.CurriedParameterGroups
-                    |> Seq.map (fun x -> makeType ctx.GenericArgs x.Type)
-                    |> Seq.toList
+        match valToSet.DeclaringEntity with
+        | Some ent when ent.IsFSharpModule && com.Options.Language = Rust ->
+            // For Rust mutable module values are compiled as functions returning refcells
+            let typ = makeType ctx.GenericArgs valToSet.FullType
 
-                if List.sameLength args expectedArgTypes then
-                    List.zip args expectedArgTypes
-                    |> List.map (fun (argExpr, expectedArgType) ->
-                        extractGenericArgs argExpr expectedArgType |> replaceGenericArgs argExpr
-                    )
-                else
-                    args
+            let memberRef =
+                Fable.GeneratedMember.Function(valToSet.CompiledName, [], typ, entRef = FsEnt.Ref(ent))
 
-            match callee, memb with
-            | Some(CreateEvent(callee, event) as createEvent), _ ->
-                let! callee = transformExpr com ctx [] callee
-                let eventType = makeType ctx.GenericArgs createEvent.Type
+            let callInfo = Fable.CallInfo.Create(memberRef = memberRef)
+            let valToSet = makeValueFrom com ctx r valToSet
+            let callExpr = makeCall r valToSet.Type callInfo valToSet
 
-                let callee =
-                    makeCallFrom com ctx (makeRangeFrom createEvent) eventType [] (Some callee) [] event
+            Fable.Set(callExpr, Fable.ValueSet, valueExpr.Type, valueExpr, r)
+        | Some ent when ent.IsFSharpModule && isModuleValueCompiledAsFunction com valToSet ->
+            // Mutable and public module values are compiled as functions, because
+            // values imported from ES2015 modules cannot be modified (see #986)
+            let valToSet = makeValueFrom com ctx r valToSet
+            let args = [ valueExpr ]
 
-                return makeCallFrom com ctx (makeRangeFrom fsExpr) typ callGenArgs (Some callee) args memb
+            let info = makeCallInfo None args [ valToSet.Type; Fable.Boolean ]
 
-            | Some unionExpr, UnionCaseTesterFor unionCase ->
-                return! transformUnionCaseTest com ctx (makeRangeFrom fsExpr) unionExpr unionExpr.Type unionCase
+            makeCall r Fable.Unit info valToSet
+        | _ ->
+            let valToSet = makeValueFrom com ctx r valToSet
+            // It can happen that we're assigning to a value of unit type
+            // and Fable replaces it with unit constant, see #2548
 
-            | callee, _ ->
-                let r = makeRangeFrom fsExpr
-                let! callee = transformExprOpt com ctx callee
+            match valToSet.Type with
+            | Fable.Unit -> valueExpr
+            | _ -> Fable.Set(valToSet, Fable.ValueSet, valueExpr.Type, valueExpr, r)
 
-                let! ctx =
-                    trampoline {
-                        match witnesses with
-                        | [] -> return ctx
-                        | witnesses ->
-                            let witnesses =
-                                witnesses
-                                |> List.choose (
-                                    function
-                                    // Index is not reliable, just append witnesses from parent call
-                                    | FSharpExprPatterns.WitnessArg _idx -> None
-                                    | NestedLambda(args, body) ->
-                                        match body with
-                                        | FSharpExprPatterns.Call(callee, memb, _, _, _args) ->
-                                            Some(memb.CompiledName, Option.isSome callee, args, body)
-                                        | FSharpExprPatterns.AnonRecordGet(_, calleeType, fieldIndex) ->
-                                            let fieldName =
-                                                calleeType.AnonRecordTypeDetails.SortedFieldNames[fieldIndex]
+    | FSharpExprPatterns.NewArray(FableType com ctx elTyp, argExprs) ->
+        let argExprs = transformExprList com ctx argExprs
+        makeArray elTyp argExprs
 
-                                            Some("get_" + fieldName, true, args, body)
-                                        | FSharpExprPatterns.FSharpFieldGet(_, _, field) ->
-                                            Some("get_" + field.Name, true, args, body)
-                                        | _ -> None
-                                    | _ -> None
-                                )
+    | FSharpExprPatterns.NewTuple(tupleType, argExprs) ->
+        let argExprs = transformExprList com ctx argExprs
 
-                            // Seems witness act like a stack (that's why we reverse them)
-                            // so a witness may need other witnesses to be resolved
-                            return!
-                                (ctx, List.rev witnesses)
-                                ||> trampolineListFold (fun ctx (traitName, isInstance, args, body) ->
-                                    trampoline {
-                                        let ctx, args = makeFunctionArgs com ctx args
 
-                                        let! body = transformExpr com ctx [] body
+        Fable.NewTuple(argExprs, tupleType.IsStructTupleType)
+        |> makeValue (makeRangeFrom fsExpr)
 
-                                        let w: Fable.Witness =
-                                            {
-                                                TraitName = traitName
-                                                IsInstance = isInstance
-                                                FileName = com.CurrentFile
-                                                Expr = Fable.Delegate(args, body, None, Fable.Tags.empty)
-                                            }
+    | FSharpExprPatterns.ObjectExpr(objType, baseCall, overrides, otherOverrides) ->
+        match ctx.EnclosingMember with
+        | Some m when m.IsImplicitConstructor ->
+            let thisArg = getIdentUniqueName ctx "_this" |> makeIdent
+            let thisValue = Fable.Value(Fable.ThisValue Fable.Any, None)
+            let ctx = { ctx with BoundConstructorThis = Some thisArg }
 
-                                        return { ctx with Witnesses = w :: ctx.Witnesses }
-                                    }
-                                )
-                    }
+            let objExpr = transformObjExpr com ctx objType baseCall overrides otherOverrides
 
-                return makeCallFrom com ctx r typ callGenArgs callee args memb
+            Fable.Let(thisArg, thisValue, objExpr)
+        | _ -> transformObjExpr com ctx objType baseCall overrides otherOverrides
 
-        // TODO: We may need to resolve local generics in args as we do in CallWithWitnesses
-        | FSharpExprPatterns.Application(applied, genArgs, args) ->
-            match applied, args with
-            // Why do application without arguments happen? So far I've seen it
-            // to access None or struct values (like the Result type)
-            | _, [] -> return! transformExpr com ctx genArgs applied
+    | FSharpExprPatterns.NewObject(memb, genArgs, args) ->
+        let args = transformExprList com ctx args
+        let genArgs = List.map (makeType ctx.GenericArgs) genArgs
+        let typ = makeType ctx.GenericArgs fsExpr.Type
 
-            // When using Fable dynamic operator, we must untuple arguments
-            // Note F# compiler wraps the value in a closure if it detects it's a lambda
-            | FSharpExprPatterns.Let((_, FSharpExprPatterns.Call(None, m, _, _, [ e1; e2 ]), _), _), args when
-                m.FullName = "Fable.Core.JsInterop.(?)"
-                || m.FullName = "Fable.Core.PyInterop.(?)"
-                ->
-                let! e1 = transformExpr com ctx genArgs e1
-                let! e2 = transformExpr com ctx [] e2
-                let e = Fable.Get(e1, Fable.ExprGet e2, Fable.Any, e1.Range)
-                let! args = transformExprList com ctx args
-                let args = destructureTupleArgs args
-                let typ = makeType ctx.GenericArgs fsExpr.Type
-                let r = makeRangeFrom fsExpr
-                // Convert this to emit so auto-uncurrying is applied
-                return emitExpr r typ (e :: args) "$0($1...)"
+        makeCallFrom com ctx (makeRangeFrom fsExpr) typ genArgs None args memb
 
-            // Some instance members such as Option.get_IsSome are compiled as static members, and the F# compiler
-            // wraps calls with an application. But in Fable they will be replaced so the application is not needed
-            | FSharpExprPatterns.Call(Some _, memb, _, [], []) as call, [ FSharpExprPatterns.Const(null, _) ] when
-                memb.IsInstanceMember && not memb.IsInstanceMemberInCompiledCode
-                ->
-                return! transformExpr com ctx [] call
+    | FSharpExprPatterns.Sequential(first, second) ->
+        let exprs =
+            match ctx.CaptureBaseConsCall with
+            | Some(baseEnt, captureBaseCall) ->
+                match first with
+                | ConstructorCall(call, genArgs, args)
+                // This pattern occurs in constructors that define a this value: `type C() as this`
+                // We're discarding the bound `this` value, it "shouldn't" be used in the base constructor arguments
+                | FSharpExprPatterns.Let(_, (ConstructorCall(call, genArgs, args))) ->
+                    match call.DeclaringEntity with
+                    | Some ent when ent = baseEnt ->
+                        let r = makeRangeFrom first
 
-            | applied, args ->
-                let! applied = transformExpr com ctx genArgs applied
-                let! args = transformExprList com ctx args
-                let typ = makeType ctx.GenericArgs fsExpr.Type
+                        transformBaseConsCall com ctx r baseEnt call genArgs args |> captureBaseCall
 
-                return Fable.CurriedApply(applied, args, typ, makeRangeFrom fsExpr)
+                        [ second ]
+                    | _ -> [ first; second ]
+                | _ -> [ first; second ]
+            | _ -> [ first; second ]
 
-        | FSharpExprPatterns.IfThenElse(guardExpr, thenExpr, elseExpr) ->
-            let! guardExpr = transformExpr com ctx [] guardExpr
-            let! thenExpr = transformExpr com ctx [] thenExpr
-            let! fableElseExpr = transformExpr com ctx [] elseExpr
+        let exprs = transformExprList com ctx exprs
+        Fable.Sequential exprs
 
-            let altElseExpr =
-                match elseExpr with
-                | RaisingMatchFailureExpr _infoWhereErrorOccurs ->
-                    let errorMessage = "Match failure"
-                    let rangeOfElseExpr = makeRangeFrom elseExpr
+    | FSharpExprPatterns.NewRecord(fsType, argExprs) ->
+        let r = makeRangeFrom fsExpr
+        let argExprs = transformExprList com ctx argExprs
+
+        let genArgs = makeTypeGenArgs ctx.GenericArgs (getGenericArguments fsType)
+
+        Fable.NewRecord(argExprs, FsEnt.Ref fsType.TypeDefinition, genArgs)
+        |> makeValue r
+
+    | FSharpExprPatterns.NewAnonRecord(fsType, argExprs) ->
+        let r = makeRangeFrom fsExpr
+        let argExprs = transformExprList com ctx argExprs
+        let fieldNames = fsType.AnonRecordTypeDetails.SortedFieldNames
+
+        let genArgs = makeTypeGenArgs ctx.GenericArgs (getGenericArguments fsType)
+
+        let isStruct =
+            match fsType.BaseType with
+            | Some typ -> (getFsTypeFullName typ) = Types.valueType
+            | None -> false
+
+        Fable.NewAnonymousRecord(argExprs, fieldNames, genArgs, isStruct) |> makeValue r
+
+    | FSharpExprPatterns.NewUnionCase(fsType, unionCase, argExprs) ->
+        let argExprs = transformExprList com ctx argExprs
+
+        argExprs |> transformNewUnion com ctx (makeRangeFrom fsExpr) fsType unionCase
+
+    | FSharpExprPatterns.TypeTest(FableType com ctx typ, expr) ->
+        let expr = transformExpr com ctx [] expr
+        Fable.Test(expr, Fable.TypeTest typ, makeRangeFrom fsExpr)
+
+    | FSharpExprPatterns.UnionCaseTest(IgnoreAddressOf unionExpr, fsType, unionCase) ->
+        transformUnionCaseTest com ctx (makeRangeFrom fsExpr) unionExpr fsType unionCase
+
+    // Pattern Matching
+    | FSharpExprPatterns.DecisionTree(IgnoreAddressOf decisionExpr, decisionTargets) ->
+        let fableDecisionExpr = transformExpr com ctx [] decisionExpr
+
+        let fableDecisionTargets = transformDecisionTargets com ctx [] decisionTargets
+
+        // rewrite last decision target if it throws MatchFailureException
+        let compiledFableTargets =
+            match snd (List.last decisionTargets) with
+            | RaisingMatchFailureExpr _infoWhereErrorOccurs ->
+                match decisionExpr with
+                | FSharpExprPatterns.IfThenElse(FSharpExprPatterns.UnionCaseTest(_unionValue, unionType, _unionCaseInfo),
+                                                _,
+                                                _) ->
+                    let rangeOfLastDecisionTarget = makeRangeFrom (snd (List.last decisionTargets))
+
+                    let errorMessage = "Match failure: " + unionType.TypeDefinition.FullName
 
                     let errorExpr =
                         Fable.Value(Fable.StringConstant errorMessage, None)
                         |> Replacements.Api.error com
+                    // Creates a "throw Error({errorMessage})" expression
+                    let throwExpr = makeThrow rangeOfLastDecisionTarget Fable.Any errorExpr
 
-                    makeThrow rangeOfElseExpr Fable.Any errorExpr
-                | _ -> fableElseExpr
+                    fableDecisionTargets |> List.replaceLast (fun _lastExpr -> [], throwExpr)
 
-            return Fable.IfThenElse(guardExpr, thenExpr, altElseExpr, makeRangeFrom fsExpr)
+                | _ ->
+                    // TODO: rewrite other `MatchFailureException` to `failwith "The match cases were incomplete"`
+                    fableDecisionTargets
 
-        | FSharpExprPatterns.TryFinally(body, finalBody, _, _) ->
-            let r = makeRangeFrom fsExpr
+            | _ -> fableDecisionTargets
 
-            match body with
-            | FSharpExprPatterns.TryWith(body, _, _, catchVar, catchBody, _, _) ->
-                return makeTryCatch com ctx r body (Some(catchVar, catchBody)) (Some finalBody)
-            | _ -> return makeTryCatch com ctx r body None (Some finalBody)
+        Fable.DecisionTree(fableDecisionExpr, compiledFableTargets)
 
-        | FSharpExprPatterns.TryWith(body, _, _, catchVar, catchBody, _, _) ->
-            return makeTryCatch com ctx (makeRangeFrom fsExpr) body (Some(catchVar, catchBody)) None
+    | FSharpExprPatterns.DecisionTreeSuccess(targetIndex, boundValues) ->
+        let boundValues = transformExprList com ctx boundValues
+        let typ = makeType ctx.GenericArgs fsExpr.Type
+        Fable.DecisionTreeSuccess(targetIndex, boundValues, typ)
 
-        | FSharpExprPatterns.NewDelegate(delegateType, fsExpr) -> return! transformDelegate com ctx delegateType fsExpr
+    | FSharpExprPatterns.ILFieldGet(None, ownerTyp, fieldName) ->
+        let ownerTyp = makeType ctx.GenericArgs ownerTyp
+        let typ = makeType ctx.GenericArgs fsExpr.Type
 
-        | FSharpExprPatterns.Lambda(arg, body) ->
-            let ctx, args = makeFunctionArgs com ctx [ arg ]
+        match Replacements.Api.tryField com typ ownerTyp fieldName with
+        | Some expr -> expr
+        | None ->
+            $"Cannot compile ILFieldGet(%A{ownerTyp}, %s{fieldName})"
+            |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
 
-            match args with
-            | [ arg ] ->
-                let! body = transformExpr com ctx [] body
-                let body = flattenLambdaBodyWithTupleArgs arg body
-                return Fable.Lambda(arg, body, None)
-            | _ -> return failwith "makeFunctionArgs returns args with different length"
+    | FSharpExprPatterns.Quote _ ->
+        "Quotes are not currently supported by Fable"
+        |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
 
-        // Getters and Setters
-        | FSharpExprPatterns.AnonRecordGet(callee, calleeType, fieldIndex) ->
-            let r = makeRangeFrom fsExpr
-            let! callee = transformExpr com ctx [] callee
+    | FSharpExprPatterns.AddressOf expr ->
+        let r = makeRangeFrom fsExpr
 
-            let fieldName = calleeType.AnonRecordTypeDetails.SortedFieldNames[fieldIndex]
+        match expr with
+        // This matches passing variables by reference
+        | FSharpExprPatterns.Call(None, memb, _, _, _)
+        | FSharpExprPatterns.Value memb ->
+            let value = makeValueFrom com ctx r memb
 
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-            // Don't use generics from the inlined context for the field type as this is used for uncurrying
-            let fieldType = makeType Map.empty fsExpr.Type
-
-            return Fable.Get(callee, Fable.FieldInfo.Create(fieldName, fieldType = fieldType), typ, r)
-
+            if memb.IsMutable || isByRefValue memb then
+                match memb.DeclaringEntity with
+                // TODO: check if it works for mutable module let bindings
+                | Some ent when ent.IsFSharpModule && isNotPrivate memb ->
+                    Replacements.Api.makeRefFromMutableFunc com ctx r value.Type value
+                | _ -> Replacements.Api.makeRefFromMutableValue com ctx r value.Type value
+            else if com.Options.Language = Rust then
+                Replacements.Api.makeRefFromMutableValue com ctx r value.Type value
+            else
+                value // Replacements.Api.makeRefCellFromValue com r value
+        // This matches passing fields by reference
         | FSharpExprPatterns.FSharpFieldGet(callee, calleeType, field) ->
             let r = makeRangeFrom fsExpr
-            let! callee = transformCallee com ctx callee calleeType
-            // let typ = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
-            let typ = resolveFieldType ctx calleeType field.FieldType
-
-            let kind =
-                Fable.FieldInfo.Create(
-                    FsField.FSharpFieldName field,
-                    fieldType = makeType Map.empty field.FieldType,
-                    isMutable = field.IsMutable
-                )
-
-            return Fable.Get(callee, kind, typ, r)
-
-        | FSharpExprPatterns.TupleGet(tupleType, tupleElemIndex, IgnoreAddressOf tupleExpr) ->
-            // F# compiler generates a tuple when matching against multiple values,
-            // if the TupleGet accesses an immutable ident in scope we use the ident directly
-            // to increase the chances of the tuple being removed in beta reduction
-            let tupleElemValue =
-                match tupleExpr with
-                | FSharpExprPatterns.Value tupleIdent when
-                    tupleIdent.IsCompilerGenerated
-                    && (tupleIdent.CompiledName = "matchValue"
-                        || tupleIdent.CompiledName = "patternInput")
-                    ->
-                    tryGetValueFromScope ctx tupleIdent
-                    |> Option.bind (
-                        function
-                        | Fable.Value(Fable.NewTuple(values, _), _) -> List.tryItem tupleElemIndex values
-                        | _ -> None
-                    )
-                | _ -> None
-
-            match tupleElemValue with
-            | Some(Fable.IdentExpr id as e) when not id.IsMutable -> return e
-            | _ ->
-                let! tupleExpr = transformExpr com ctx [] tupleExpr
-                //            let typ = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
-                let typ =
-                    Seq.item tupleElemIndex tupleType.GenericArguments |> makeType ctx.GenericArgs
-
-                return Fable.Get(tupleExpr, Fable.TupleIndex tupleElemIndex, typ, makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.UnionCaseGet(IgnoreAddressOf unionExpr, unionType, unionCase, field) ->
-            let r = makeRangeFrom fsExpr
-            // let fieldType = makeType ctx.GenericArgs fsExpr.Type // Doesn't always work
-            let fieldType = resolveFieldType ctx unionType field.FieldType
-            let! unionExpr = transformExpr com ctx [] unionExpr
-
-            match getUnionPattern unionType unionCase with
-            | ErasedUnionCase ->
-                let index = unionCase.Fields |> Seq.findIndex (fun x -> x.Name = field.Name)
-
-                return Fable.Get(unionExpr, Fable.TupleIndex(index), makeType ctx.GenericArgs unionType, r)
-            | ErasedUnion _ ->
-                if unionCase.Fields.Count = 1 then
-                    return unionExpr
-                else
-                    let index = unionCase.Fields |> Seq.findIndex (fun x -> x.Name = field.Name)
-
-                    return Fable.Get(unionExpr, Fable.TupleIndex index, fieldType, r)
-            | TypeScriptTaggedUnion _ ->
-                // if not (FsUnionCase.HasNamedFields unionCase) then
-                //     return unionExpr
-                // else
-                let kind =
-                    Fable.FieldInfo.Create(
-                        FsField.FSharpFieldName field,
-                        fieldType = makeType Map.empty field.FieldType
-                    )
-
-                return Fable.Get(unionExpr, kind, fieldType, r)
-            | StringEnum _ ->
-                return
-                    "StringEnum types cannot have fields"
-                    |> addErrorAndReturnNull com ctx.InlinePath r
-            | OptionUnion(t, _) -> return Fable.Get(unionExpr, Fable.OptionValue, makeType ctx.GenericArgs t, r)
-            | ListUnion t ->
-                let t = makeType ctx.GenericArgs t
-
-                let kind, t =
-                    if field.Name = "Head" then
-                        Fable.ListHead, t
-                    else
-                        Fable.ListTail, Fable.List t
-
-                return Fable.Get(unionExpr, kind, t, r)
-            | DiscriminatedUnion(tdef, genArgs) ->
-                let caseIndex = unionCaseTag com tdef unionCase
-
-                let fieldIndex = unionCase.Fields |> Seq.findIndex (fun fi -> fi.Name = field.Name)
-
-                let kind =
-                    Fable.UnionFieldInfo.Create(
-                        entity = FsEnt.Ref tdef,
-                        genArgs = makeTypeGenArgs ctx.GenericArgs genArgs,
-                        caseIndex = caseIndex,
-                        fieldIndex = fieldIndex
-                    )
-
-                return Fable.Get(unionExpr, kind, fieldType, r)
-
-        | FSharpExprPatterns.FSharpFieldSet(callee, calleeType, field, value) ->
-            let r = makeRangeFrom fsExpr
-            let t = makeType Map.empty field.FieldType
-            let! callee = transformCallee com ctx callee calleeType
-            let! value = transformExpr com ctx [] value
-
-            return Fable.Set(callee, Fable.FieldSet(FsField.FSharpFieldName field), t, value, r)
-
-        | FSharpExprPatterns.UnionCaseTag(IgnoreAddressOf unionExpr, unionType) ->
-            // TODO: This is an inconsistency. For new unions and union tests we calculate
-            // the tag in this step but here we delay the calculation until Fable2Babel
-            do
-                tryDefinition unionType
-                |> Option.iter (fun (tdef, _) -> com.AddWatchDependency(FsEnt.SourcePath tdef))
-
-            let! unionExpr = transformExpr com ctx [] unionExpr
-
-            return Fable.Get(unionExpr, Fable.UnionTag, Fable.Any, makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.UnionCaseSet(_unionExpr, _type, _case, _caseField, _valueExpr) ->
-            return
-                "Unexpected UnionCaseSet"
-                |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.ValueSet(valToSet, valueExpr) ->
-            let r = makeRangeFrom fsExpr
-            let! valueExpr = transformExpr com ctx [] valueExpr
-
-            match valToSet.DeclaringEntity with
-            | Some ent when ent.IsFSharpModule && com.Options.Language = Rust ->
-                // For Rust mutable module values are compiled as functions returning refcells
-                let typ = makeType ctx.GenericArgs valToSet.FullType
-
-                let memberRef =
-                    Fable.GeneratedMember.Function(valToSet.CompiledName, [], typ, entRef = FsEnt.Ref(ent))
-
-                let callInfo = Fable.CallInfo.Create(memberRef = memberRef)
-                let valToSet = makeValueFrom com ctx r valToSet
-                let callExpr = makeCall r valToSet.Type callInfo valToSet
-
-                return Fable.Set(callExpr, Fable.ValueSet, valueExpr.Type, valueExpr, r)
-            | Some ent when ent.IsFSharpModule && isModuleValueCompiledAsFunction com valToSet ->
-                // Mutable and public module values are compiled as functions, because
-                // values imported from ES2015 modules cannot be modified (see #986)
-                let valToSet = makeValueFrom com ctx r valToSet
-                let args = [ valueExpr ]
-
-                let info = makeCallInfo None args [ valToSet.Type; Fable.Boolean ]
-
-                return makeCall r Fable.Unit info valToSet
-            | _ ->
-                let valToSet = makeValueFrom com ctx r valToSet
-                // It can happen that we're assigning to a value of unit type
-                // and Fable replaces it with unit constant, see #2548
-                return
-                    match valToSet.Type with
-                    | Fable.Unit -> valueExpr
-                    | _ -> Fable.Set(valToSet, Fable.ValueSet, valueExpr.Type, valueExpr, r)
-
-        | FSharpExprPatterns.NewArray(FableType com ctx elTyp, argExprs) ->
-            let! argExprs = transformExprList com ctx argExprs
-            return makeArray elTyp argExprs
-
-        | FSharpExprPatterns.NewTuple(tupleType, argExprs) ->
-            let! argExprs = transformExprList com ctx argExprs
-
-            return
-                Fable.NewTuple(argExprs, tupleType.IsStructTupleType)
-                |> makeValue (makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.ObjectExpr(objType, baseCall, overrides, otherOverrides) ->
-            match ctx.EnclosingMember with
-            | Some m when m.IsImplicitConstructor ->
-                let thisArg = getIdentUniqueName ctx "_this" |> makeIdent
-                let thisValue = Fable.Value(Fable.ThisValue Fable.Any, None)
-                let ctx = { ctx with BoundConstructorThis = Some thisArg }
-
-                let! objExpr = transformObjExpr com ctx objType baseCall overrides otherOverrides
-
-                return Fable.Let(thisArg, thisValue, objExpr)
-            | _ -> return! transformObjExpr com ctx objType baseCall overrides otherOverrides
-
-        | FSharpExprPatterns.NewObject(memb, genArgs, args) ->
-            let! args = transformExprList com ctx args
-            let genArgs = List.map (makeType ctx.GenericArgs) genArgs
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-
-            return makeCallFrom com ctx (makeRangeFrom fsExpr) typ genArgs None args memb
-
-        | FSharpExprPatterns.Sequential(first, second) ->
-            let exprs =
-                match ctx.CaptureBaseConsCall with
-                | Some(baseEnt, captureBaseCall) ->
-                    match first with
-                    | ConstructorCall(call, genArgs, args)
-                    // This pattern occurs in constructors that define a this value: `type C() as this`
-                    // We're discarding the bound `this` value, it "shouldn't" be used in the base constructor arguments
-                    | FSharpExprPatterns.Let(_, (ConstructorCall(call, genArgs, args))) ->
-                        match call.DeclaringEntity with
-                        | Some ent when ent = baseEnt ->
-                            let r = makeRangeFrom first
-
-                            transformBaseConsCall com ctx r baseEnt call genArgs args |> captureBaseCall
-
-                            [ second ]
-                        | _ -> [ first; second ]
-                    | _ -> [ first; second ]
-                | _ -> [ first; second ]
-
-            let! exprs = transformExprList com ctx exprs
-            return Fable.Sequential exprs
-
-        | FSharpExprPatterns.NewRecord(fsType, argExprs) ->
-            let r = makeRangeFrom fsExpr
-            let! argExprs = transformExprList com ctx argExprs
-
-            let genArgs = makeTypeGenArgs ctx.GenericArgs (getGenericArguments fsType)
-
-            return
-                Fable.NewRecord(argExprs, FsEnt.Ref fsType.TypeDefinition, genArgs)
-                |> makeValue r
-
-        | FSharpExprPatterns.NewAnonRecord(fsType, argExprs) ->
-            let r = makeRangeFrom fsExpr
-            let! argExprs = transformExprList com ctx argExprs
-            let fieldNames = fsType.AnonRecordTypeDetails.SortedFieldNames
-
-            let genArgs = makeTypeGenArgs ctx.GenericArgs (getGenericArguments fsType)
-
-            let isStruct =
-                match fsType.BaseType with
-                | Some typ -> (getFsTypeFullName typ) = Types.valueType
-                | None -> false
-
-            return Fable.NewAnonymousRecord(argExprs, fieldNames, genArgs, isStruct) |> makeValue r
-
-        | FSharpExprPatterns.NewUnionCase(fsType, unionCase, argExprs) ->
-            let! argExprs = transformExprList com ctx argExprs
-
-            return argExprs |> transformNewUnion com ctx (makeRangeFrom fsExpr) fsType unionCase
-
-        | FSharpExprPatterns.TypeTest(FableType com ctx typ, expr) ->
-            let! expr = transformExpr com ctx [] expr
-            return Fable.Test(expr, Fable.TypeTest typ, makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.UnionCaseTest(IgnoreAddressOf unionExpr, fsType, unionCase) ->
-            return! transformUnionCaseTest com ctx (makeRangeFrom fsExpr) unionExpr fsType unionCase
-
-        // Pattern Matching
-        | FSharpExprPatterns.DecisionTree(IgnoreAddressOf decisionExpr, decisionTargets) ->
-            let! fableDecisionExpr = transformExpr com ctx [] decisionExpr
-
-            let! fableDecisionTargets = transformDecisionTargets com ctx [] decisionTargets
-
-            // rewrite last decision target if it throws MatchFailureException
-            let compiledFableTargets =
-                match snd (List.last decisionTargets) with
-                | RaisingMatchFailureExpr _infoWhereErrorOccurs ->
-                    match decisionExpr with
-                    | FSharpExprPatterns.IfThenElse(FSharpExprPatterns.UnionCaseTest(_unionValue,
-                                                                                     unionType,
-                                                                                     _unionCaseInfo),
-                                                    _,
-                                                    _) ->
-                        let rangeOfLastDecisionTarget = makeRangeFrom (snd (List.last decisionTargets))
-
-                        let errorMessage = "Match failure: " + unionType.TypeDefinition.FullName
-
-                        let errorExpr =
-                            Fable.Value(Fable.StringConstant errorMessage, None)
-                            |> Replacements.Api.error com
-                        // Creates a "throw Error({errorMessage})" expression
-                        let throwExpr = makeThrow rangeOfLastDecisionTarget Fable.Any errorExpr
-
-                        fableDecisionTargets |> List.replaceLast (fun _lastExpr -> [], throwExpr)
-
-                    | _ ->
-                        // TODO: rewrite other `MatchFailureException` to `failwith "The match cases were incomplete"`
-                        fableDecisionTargets
-
-                | _ -> fableDecisionTargets
-
-            return Fable.DecisionTree(fableDecisionExpr, compiledFableTargets)
-
-        | FSharpExprPatterns.DecisionTreeSuccess(targetIndex, boundValues) ->
-            let! boundValues = transformExprList com ctx boundValues
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-            return Fable.DecisionTreeSuccess(targetIndex, boundValues, typ)
-
-        | FSharpExprPatterns.ILFieldGet(None, ownerTyp, fieldName) ->
-            let ownerTyp = makeType ctx.GenericArgs ownerTyp
-            let typ = makeType ctx.GenericArgs fsExpr.Type
-
-            match Replacements.Api.tryField com typ ownerTyp fieldName with
-            | Some expr -> return expr
-            | None ->
-                return
-                    $"Cannot compile ILFieldGet(%A{ownerTyp}, %s{fieldName})"
-                    |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.Quote _ ->
-            return
-                "Quotes are not currently supported by Fable"
-                |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
-
-        | FSharpExprPatterns.AddressOf expr ->
-            let r = makeRangeFrom fsExpr
-
-            match expr with
-            // This matches passing variables by reference
-            | FSharpExprPatterns.Call(None, memb, _, _, _)
-            | FSharpExprPatterns.Value memb ->
-                let value = makeValueFrom com ctx r memb
-
-                if memb.IsMutable || isByRefValue memb then
-                    match memb.DeclaringEntity with
-                    // TODO: check if it works for mutable module let bindings
-                    | Some ent when ent.IsFSharpModule && isNotPrivate memb ->
-                        return Replacements.Api.makeRefFromMutableFunc com ctx r value.Type value
-                    | _ -> return Replacements.Api.makeRefFromMutableValue com ctx r value.Type value
-                else if com.Options.Language = Rust then
-                    return Replacements.Api.makeRefFromMutableValue com ctx r value.Type value
-                else
-                    return value // Replacements.Api.makeRefCellFromValue com r value
-            // This matches passing fields by reference
-            | FSharpExprPatterns.FSharpFieldGet(callee, calleeType, field) ->
-                let r = makeRangeFrom fsExpr
-                let! callee = transformCallee com ctx callee calleeType
-                let typ = makeType ctx.GenericArgs expr.Type
-                let key = FsField.FSharpFieldName field
-
-                return Replacements.Api.makeRefFromMutableField com ctx r typ callee key
-            | _ ->
-                // ignore AddressOf, pass by value
-                return! transformExpr com ctx [] expr
-
-        | FSharpExprPatterns.AddressSet expr ->
-            let r = makeRangeFrom fsExpr
-
-            match expr with
-            | FSharpExprPatterns.Value valToSet, valueExpr when isByRefValue valToSet ->
-                // Setting byref value is compiled as FSharpRef op_ColonEquals
-                let! value = transformExpr com ctx [] valueExpr
-                let valToSet = makeValueFrom com ctx r valToSet
-                return Replacements.Api.setRefCell com r valToSet value
-            | _ ->
-                return
-                    "Mutating this argument passed by reference is not supported"
-                    |> addErrorAndReturnNull com ctx.InlinePath r
-
-        // | FSharpExprPatterns.ILFieldSet _
-        // | FSharpExprPatterns.ILAsm _
-        | expr ->
-            return
-                $"Cannot compile expression %A{expr}"
-                |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
-    }
+            let callee = transformCallee com ctx callee calleeType
+            let typ = makeType ctx.GenericArgs expr.Type
+            let key = FsField.FSharpFieldName field
+
+            Replacements.Api.makeRefFromMutableField com ctx r typ callee key
+        | _ ->
+            // ignore AddressOf, pass by value
+            transformExpr com ctx [] expr
+
+    | FSharpExprPatterns.AddressSet expr ->
+        let r = makeRangeFrom fsExpr
+
+        match expr with
+        | FSharpExprPatterns.Value valToSet, valueExpr when isByRefValue valToSet ->
+            // Setting byref value is compiled as FSharpRef op_ColonEquals
+            let value = transformExpr com ctx [] valueExpr
+            let valToSet = makeValueFrom com ctx r valToSet
+            Replacements.Api.setRefCell com r valToSet value
+        | _ ->
+            "Mutating this argument passed by reference is not supported"
+            |> addErrorAndReturnNull com ctx.InlinePath r
+
+    // | FSharpExprPatterns.ILFieldSet _
+    // | FSharpExprPatterns.ILAsm _
+    | expr ->
+        $"Cannot compile expression %A{expr}"
+        |> addErrorAndReturnNull com ctx.InlinePath (makeRangeFrom fsExpr)
 
 let private isIgnoredNonAttachedMember (memb: FSharpMemberOrFunctionOrValue) =
     Option.isSome memb.LiteralValue
@@ -1533,7 +1491,7 @@ let private transformPrimaryConstructor
 
         let bodyCtx, args = bindMemberArgs com ctx args
         let bodyCtx = { bodyCtx with CaptureBaseConsCall = captureBaseCall }
-        let body = transformExpr com bodyCtx [] body |> run
+        let body = transformExpr com bodyCtx [] body
         let consName, _ = getMemberDeclarationName com memb
 
         let cons: Fable.MemberDecl =
@@ -1589,7 +1547,7 @@ let private transformMemberValue
     (memb: FSharpMemberOrFunctionOrValue)
     (value: FSharpExpr)
     =
-    let value = transformExpr com ctx [] value |> run
+    let value = transformExpr com ctx [] value
 
     match value with
     // Accept import expressions, e.g. let foo = import "foo" "myLib"
@@ -1727,7 +1685,7 @@ let private transformMemberFunction
     (body: FSharpExpr)
     =
     let bodyCtx, args = bindMemberArgs com ctx args
-    let body = transformExpr com bodyCtx [] body |> run
+    let body = transformExpr com bodyCtx [] body
 
     match body with
     // Accept import expressions, e.g. let foo x y = import "foo" "myLib"
@@ -1822,7 +1780,7 @@ let private transformImplementedSignature
     (body: FSharpExpr)
     =
     let bodyCtx, args = bindMemberArgs com ctx args
-    let body = transformExpr com bodyCtx [] body |> run
+    let body = transformExpr com bodyCtx [] body
     let entFullName = implementingEntity.FullName
 
     let info =
@@ -1861,7 +1819,7 @@ let private transformExplicitlyAttachedMember
     (body: FSharpExpr)
     =
     let bodyCtx, args = bindMemberArgs com ctx args
-    let body = transformExpr com bodyCtx [] body |> run
+    let body = transformExpr com bodyCtx [] body
     let entFullName = declaringEntity.FullName
 
     let name, isMangled =
@@ -2087,7 +2045,7 @@ let rec private transformDeclarations (com: FableCompiler) ctx fsDecls =
             transformMemberDecl com ctx memb args body
         | FSharpImplementationFileDeclaration.InitAction fe ->
             let ctx = { ctx with UsedNamesInDeclarationScope = HashSet() }
-            let e = transformExpr com ctx [] fe |> run
+            let e = transformExpr com ctx [] fe
 
             [
                 Fable.ActionDeclaration
@@ -2626,7 +2584,7 @@ type FableCompiler(com: Compiler) =
             if onlyOnceWarnings.Add(msg) then
                 addWarning com [] range msg
 
-        member this.Transform(ctx, fsExpr) = transformExpr this ctx [] fsExpr |> run
+        member this.Transform(ctx, fsExpr) = transformExpr this ctx [] fsExpr
 
         member this.TryReplace(ctx, r, t, info, thisArg, args) =
             this.TryReplace(ctx, r, t, info, thisArg, args)
